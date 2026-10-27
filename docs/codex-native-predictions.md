@@ -97,3 +97,18 @@ compact-number formatting assertion failures (`4567` versus English `4.6K`,
 and `4500` versus `4.5K`). Both were reproduced from the unmodified upstream
 revision `2cfe5e51314bfc0bf70bdda1ba08aed82c7dc8bf`; prediction settings tests and
 the TypeScript typecheck passed. This feature does not change number formatting.
+
+The separate Electron native-module-loader smoke test also has a pre-existing
+assertion mismatch on both this branch and that upstream revision: it expects
+an unsupported quota module to fail, while the existing loader successfully
+selects its Fast-only fallback. The test reaches that assertion in about four
+seconds; an earlier 30-second startup timeout was not reproduced. This smoke
+test is not counted as passing.
+
+The Windows release build completed successfully. The local installation was
+fully backed up before replacement; all 19 deployed files were verified, the
+new option appeared enabled in the installed settings UI, and the only
+configuration difference was the new prediction setting. The original Codex
+process remained open and its installed ASAR hash was unchanged. Activating the
+feature in an already open Codex document still requires restarting that
+instance through Cockpit when idle.
