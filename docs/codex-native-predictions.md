@@ -143,6 +143,9 @@ original acceptance results.
 One paired synthetic measurement used the same official Codex version and
 conversation, with temporary test-harness instrumentation only:
 
+Gray timing records the native plugin's DOM insertion with `MutationObserver`;
+it is not a physical screen-paint measurement.
+
 | Interval | Before | After |
 | --- | ---: | ---: |
 | Prediction request to prediction turn completed | 6921.1 ms | 5199.0 ms |
@@ -160,3 +163,10 @@ seconds-level speedup. Model/provider inference still takes additional time.
 The corrected source was rechecked in the native UI: actual Tab acceptance kept
 message counts unchanged, and draft, Chinese IME, and running-turn checks passed.
 Only synthetic conversations and sanitized timing results were retained.
+
+The corrected Windows release was rebuilt and installed after a separate full
+backup of the preceding feature build. All 19 installed files matched the new
+bundle; settings were unchanged and predictions remained enabled. The original
+Codex process and installed ASAR were preserved. The first pre-feature backup
+was also retained. An existing Codex document loads the correction after an
+idle restart through Cockpit.
