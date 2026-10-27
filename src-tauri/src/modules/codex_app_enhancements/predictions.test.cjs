@@ -65,6 +65,12 @@ function activate(env, fake) {
   return env.api.runtime.serviceFor({}, "local", null);
 }
 
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
 const fixtures = {
   initial: "function managerFor(scope,host){let registry=scope.get(registryAtom);if(registry)return registry.forHost(host);throw Error(`AppServerManager RPC is unavailable for hostId: ${host}`)}function initialize(){return slot=atom(base,({get:read})=>read(gates,`4290031608`)&&setting(read,descriptor().enabled)&&services.cumberbatch!=null)}",
   composer: "function Prediction(properties){let memo=cache(15),{controller:controller,canShowPrediction:visible,hostId:host,pluginHostId:plugin,roots:roots}=properties,scope=useScope(scopeAtom),target=read(targetAtom),service=services.cumberbatch,unused;let request={...target,generationTrigger:`catch_up`};return service.requestUserMessagePrediction(request)}",
@@ -119,6 +125,19 @@ test("readiness and verified API flags are both required", async () => {
   } finally { env.stop(); }
 });
 
+test("a synchronous auth failure returns null and removes its initialized job", async () => {
+  const env = environment(), fake = nativeManager();
+  fake.manager.getAuthMethod = () => { throw new Error("Auth unavailable"); };
+  try {
+    const pending = activate(env, fake).requestUserMessagePrediction(target);
+    assert.equal(await pending, null);
+    assert.equal(env.api.runtime.status().inFlight, 0);
+    assert.equal(env.api.runtime.status().reason, "request-failed");
+    assert.deepEqual(fake.calls, []);
+    assert.equal(fake.listeners.size, 0);
+  } finally { env.stop(); }
+});
+
 test("native fork inherits provider and uses the original source without HTTP generation", async () => {
   const env = environment(), fake = nativeManager();
   try {
@@ -156,6 +175,118 @@ test("matching requests share one native job and completed source turns stay cac
     await service.requestUserMessagePrediction(target);
     assert.equal(fake.calls.filter(call => call.method === "turn/start").length, 1);
   } finally { env.stop(); }
+});
+
+test("a completed prediction is delivered while its unsubscribe RPC is pending", async () => {
+  const unsubscribe = deferred(), cleanupStarted = deferred();
+  const env = environment(), fake = nativeManager({ request(method) {
+    if (method === "thread/unsubscribe") { cleanupStarted.resolve(); return unsubscribe.promise; }
+  } });
+  let delivered = false, result;
+  try {
+    const pending = activate(env, fake).requestUserMessagePrediction(target).then(value => { delivered = true; result = value; });
+    await cleanupStarted.promise;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(delivered, true);
+    assert.equal(result.text, "Inspect the next diagnostic result.");
+    assert.equal(fake.disposed, 5);
+    assert.equal(fake.listeners.size, 0);
+    assert.equal(env.api.runtime.status().inFlight, 0);
+    unsubscribe.resolve({});
+    await pending;
+    assert.equal(fake.calls.filter(call => call.method === "thread/unsubscribe").length, 1);
+  } finally { unsubscribe.resolve({}); env.stop(); }
+});
+
+test("cancellation delivers null and dispatches unsubscribe without waiting for interrupt", async () => {
+  const interrupt = deferred(), unsubscribe = deferred(), cleanupStarted = deferred();
+  const env = environment(), fake = nativeManager({ pending: true, request(method) {
+    if (method === "turn/interrupt") { cleanupStarted.resolve(); return interrupt.promise; }
+    if (method === "thread/unsubscribe") return unsubscribe.promise;
+  } });
+  let delivered = false, result;
+  try {
+    const pending = activate(env, fake).requestUserMessagePrediction(target);
+    pending.then(value => { delivered = true; result = value; });
+    while (!fake.calls.some(call => call.method === "turn/start")) await new Promise(resolve => setImmediate(resolve));
+    pending[Symbol.dispose]();
+    await cleanupStarted.promise;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(delivered, true);
+    assert.equal(result, null);
+    assert.deepEqual(fake.calls.slice(-2).map(call => call.method), ["turn/interrupt", "thread/unsubscribe"]);
+    assert.equal(fake.disposed, 5);
+    assert.equal(fake.listeners.size, 0);
+    assert.equal(env.api.runtime.status().inFlight, 0);
+    interrupt.resolve({});
+    unsubscribe.resolve({});
+    await pending;
+  } finally { interrupt.resolve({}); unsubscribe.resolve({}); env.stop(); }
+});
+
+test("an already failed or interrupted turn is unsubscribed without another interrupt", async () => {
+  for (const status of ["failed", "interrupted"]) {
+    const env = environment(), fake = nativeManager({ pending: true });
+    try {
+      const pending = activate(env, fake).requestUserMessagePrediction(target);
+      while (!fake.calls.some(call => call.method === "turn/start")) await new Promise(resolve => setImmediate(resolve));
+      fake.emit({ method: "turn/completed", params: { threadId: "prediction", turn: { id: "prediction-turn", status } } });
+      assert.equal(await pending, null);
+      assert.equal(fake.calls.some(call => call.method === "turn/interrupt"), false);
+      assert.equal(fake.calls.filter(call => call.method === "thread/unsubscribe").length, 1);
+      assert.equal(fake.listeners.size, 0);
+    } finally { env.stop(); }
+  }
+});
+
+test("rejected background cleanup does not change a completed or cancelled result", async () => {
+  for (const cancelled of [false, true]) {
+    const interrupt = deferred(), unsubscribe = deferred();
+    const env = environment(), fake = nativeManager({ pending: cancelled, request(method) {
+      if (method === "turn/interrupt") return interrupt.promise;
+      if (method === "thread/unsubscribe") return unsubscribe.promise;
+    } });
+    try {
+      const pending = activate(env, fake).requestUserMessagePrediction(target);
+      if (cancelled) {
+        while (!fake.calls.some(call => call.method === "turn/start")) await new Promise(resolve => setImmediate(resolve));
+        pending[Symbol.dispose]();
+      }
+      const result = await pending;
+      assert.equal(cancelled ? result : result.text, cancelled ? null : "Inspect the next diagnostic result.");
+      if (cancelled) interrupt.reject(new Error("Interrupt disconnected"));
+      unsubscribe.reject(new Error("Unsubscribe disconnected"));
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(await pending, result);
+      assert.equal(env.api.runtime.status().inFlight, 0);
+      assert.equal(fake.listeners.size, 0);
+    } finally { interrupt.resolve({}); unsubscribe.resolve({}); env.stop(); }
+  }
+});
+
+test("an old disposed job cannot remove a reacquired job for the same source turn", async () => {
+  const unsubscribe = deferred();
+  const env = environment(), fake = nativeManager({ pending: true, request(method) {
+    if (method === "thread/unsubscribe") return unsubscribe.promise;
+  } });
+  try {
+    const service = activate(env, fake);
+    const first = service.requestUserMessagePrediction(target);
+    while (!fake.calls.some(call => call.method === "turn/start")) await new Promise(resolve => setImmediate(resolve));
+    env.api.runtime.dispose();
+    env.api.setReady(true);
+    const second = service.requestUserMessagePrediction(target);
+    assert.equal(await first, null);
+    while (fake.calls.filter(call => call.method === "turn/start").length < 2) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(env.api.runtime.status().inFlight, 1);
+    assert.equal(service.requestUserMessagePrediction(target), second);
+    unsubscribe.resolve({});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(env.api.runtime.status().inFlight, 1);
+    second[Symbol.dispose]();
+    assert.equal(await second, null);
+    assert.equal(env.api.runtime.status().inFlight, 0);
+  } finally { unsubscribe.resolve({}); env.stop(); }
 });
 
 test("repeating the same bootstrap preserves active native bindings and jobs", async () => {

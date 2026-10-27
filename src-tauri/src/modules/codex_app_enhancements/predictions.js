@@ -192,20 +192,22 @@
         else rejectCompletion(new Error("Prediction did not complete"));
       }
     };
-    const cleanup = async () => {
+    const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
       clearTimeout(timed);
-      if (forkId) {
-        if (!finished && turnId) {
-          try { await manager.sendRequest("turn/interrupt", { threadId: forkId, turnId }, { priority: "background", timeoutMs: 2000 }); } catch { /* already ended/disconnected */ }
-        }
-        try { await manager.sendRequest("thread/unsubscribe", { threadId: forkId }, { priority: "background", timeoutMs: 2000 }); } catch { /* disconnected */ }
-      }
       closed = true;
       for (const listener of listeners) disposeValue(listener);
+      // Native prediction cleanup releases local listeners before dispatching
+      // interrupt/unsubscribe, without waiting for their RPC acknowledgements.
+      if (forkId) {
+        if (!settled && turnId) {
+          try { manager.sendRequest("turn/interrupt", { threadId: forkId, turnId }, { priority: "background", timeoutMs: 2000 }).catch(() => {}); } catch { /* already ended/disconnected */ }
+        }
+        try { manager.sendRequest("thread/unsubscribe", { threadId: forkId }, { priority: "background", timeoutMs: 2000 }).catch(() => {}); } catch { /* disconnected */ }
+      }
     };
-    const promise = (async () => {
+    const promise = Promise.resolve().then(async () => {
       try {
         const auth = await wait(manager.getAuthMethod());
         if (!isApiAuth(auth)) {
@@ -289,11 +291,10 @@
         }
         return null;
       } finally {
-        await cleanup();
-        closed = true;
-        if (jobs.get(target.threadId)?.key === key) jobs.delete(target.threadId);
+        cleanup();
+        if (jobs.get(target.threadId)?.promise === promise) jobs.delete(target.threadId);
       }
-    })();
+    });
     Object.defineProperty(promise, Symbol.dispose, { value: cancel });
     jobs.set(target.threadId, { key, promise, cancel });
     return promise;

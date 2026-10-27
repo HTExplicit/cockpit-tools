@@ -39,6 +39,15 @@ changes, disabling the option, and runtime disposal cancel pending work. Late
 results are discarded. Temporary subscriptions and forks are released in the
 completion and failure paths; the source thread is never interrupted.
 
+Like the native prediction helper, all exit paths synchronously release local
+timers and subscriptions, then dispatch server cleanup without waiting for RPC
+acknowledgements. An unfinished prediction is interrupted before unsubscribe is
+dispatched; an already terminal turn is not interrupted again. Predictions are
+still delivered only after `turn/completed`, not when an intermediate message
+first looks complete. A finished result does not wait for server unsubscribe.
+An old task can remove only its own active-job entry, including when a new task
+has reacquired the same source turn.
+
 The native `experimentalDisablePredictionMcp` option is used where supported.
 It is not a universal server-side tool prohibition. Unexpected tool or approval
 requests terminate the prediction rather than continue the source task.
@@ -80,7 +89,7 @@ The synthetic module/RPC tests cover unsupported and ambiguous contracts,
 independent prediction-only activation, shared Fast/quota module graphs,
 transport reattachment, native setting disablement, early/late notifications,
 timeout, cancellation, approval requests, invalid fork identities, and cleanup.
-The final adapter and graph checks passed 26 tests. The full enhancement CJS
+The initial adapter and graph checks passed 26 tests. The full enhancement CJS
 suite passed 129 tests with 15 optional installed-artifact checks skipped.
 The shared settings UI passed both variants; all 18 locale files passed key
 validation. Rust enhancement/lifecycle checks passed 67 tests, with the two
@@ -112,3 +121,42 @@ configuration difference was the new prediction setting. The original Codex
 process remained open and its installed ASAR hash was unchanged. Activating the
 feature in an already open Codex document still requires restarting that
 instance through Cockpit when idle.
+
+### Cleanup timing follow-up
+
+A read-only comparison with the installed native prediction helper confirmed
+that local listeners are released synchronously and server interrupt/unsubscribe
+acknowledgements are not awaited before completing the request. The compatibility
+adapter now follows that order for successful, cancelled, and failed requests.
+It also avoids interrupting an already terminal turn and compares existing job
+promise identities so an old disposed task cannot remove a reacquired task for
+the same source turn. No model, prompt, generation trigger, editor, or retry
+policy changed.
+
+Six additional deterministic regression tests cover deferred cleanup, rejected
+cleanup, terminal failures, job reacquisition, and a synchronous manager error.
+The updated adapter/module graph checks passed 32 tests; the complete enhancement
+CJS suite passed 135 tests with the same 15 optional artifact checks skipped.
+The unrelated initial configuration, locale, and Rust results above remain the
+original acceptance results.
+
+One paired synthetic measurement used the same official Codex version and
+conversation, with temporary test-harness instrumentation only:
+
+| Interval | Before | After |
+| --- | ---: | ---: |
+| Prediction request to prediction turn completed | 6921.1 ms | 5199.0 ms |
+| Turn completed to service result delivered | 38.4 ms | 21.4 ms |
+| Turn completed to native gray rendered | 68.2 ms | 44.5 ms |
+| Turn completed to unsubscribe acknowledged | 38.0 ms | 54.0 ms |
+| Prediction request to native gray rendered | 6989.3 ms | 5243.5 ms |
+
+After the fix, the native gray appeared 9.5 ms before unsubscribe completed.
+This demonstrates that server cleanup no longer blocks result delivery. The
+roughly 1.7-second difference in total duration mostly reflects prediction
+generation variability; this single pair is not evidence of a stable
+seconds-level speedup. Model/provider inference still takes additional time.
+
+The corrected source was rechecked in the native UI: actual Tab acceptance kept
+message counts unchanged, and draft, Chinese IME, and running-turn checks passed.
+Only synthetic conversations and sanitized timing results were retained.
