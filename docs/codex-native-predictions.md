@@ -80,6 +80,17 @@ The synthetic module/RPC tests cover unsupported and ambiguous contracts,
 independent prediction-only activation, shared Fast/quota module graphs,
 transport reattachment, native setting disablement, early/late notifications,
 timeout, cancellation, approval requests, invalid fork identities, and cleanup.
+The final adapter and graph checks passed 26 tests. The full enhancement CJS
+suite passed 129 tests with 15 optional installed-artifact checks skipped.
+The shared settings UI passed both variants; all 18 locale files passed key
+validation. Rust enhancement/lifecycle checks passed 67 tests, with the two
+additional default/partial-update configuration checks also passing.
+
+On this Windows machine the generated Rust library-test executable needed a
+Common Controls v6 manifest to load `TaskDialogIndirect`. The manifest was
+added only to that local build artifact before running the tests. The normal
+Tauri application already contains the required manifest; no system DLL or
+product dependency changes were made for the test harness.
 
 The full TypeScript suite on a Chinese Windows locale had two pre-existing
 compact-number formatting assertion failures (`4567` versus English `4.6K`,
