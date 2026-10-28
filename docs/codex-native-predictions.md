@@ -100,6 +100,10 @@ preflight results; corrected-adapter acceptance is recorded separately below.
 
 ### Corrected sampling adapter acceptance
 
+The sampling acceptance used the unmodified official Windows package
+`26.1021.3705.0` and app-server `0.164.0-alpha.11.1`. The older desktop version
+below belongs to the initial implementation's historical acceptance.
+
 The v2 adapter generated both catch-up and automatic live predictions through
 the official sampler. Real `responseId` and matching source-turn metadata were
 observed, and the native `cumberbatch` plugin displayed the suggestion. Actual
@@ -124,6 +128,14 @@ The updated adapter/module graph suite passed 33 tests. The complete enhancement
 CJS suite passed 136 tests, with 15 optional artifact checks skipped and no
 failures. The standard Windows release build, including its required TypeScript
 checks, also passed. Unrelated initial tests below were not additionally rerun.
+
+The accepted Windows build was installed after a new complete backup of the
+preceding build; the original pre-feature backup was retained. All 19 deployed
+files matched the validated bundle. The complete Cockpit configuration was
+semantically unchanged, predictions remained enabled, and the original Codex
+process continued running. The installed official ASAR hash was unchanged.
+Existing Codex documents load the sampling adapter after an idle instance
+restart through Cockpit; installation did not restart those documents.
 
 ### Initial fork implementation acceptance (historical)
 
