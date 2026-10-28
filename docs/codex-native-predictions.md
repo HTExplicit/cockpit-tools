@@ -15,10 +15,16 @@ automatically.
 The adapter uses the existing Cockpit document-start module loader. It does not
 rewrite Codex installation files, create an additional suggestion overlay, or
 send model requests from an independent HTTP client. The Codex app-server owns
-the temporary prediction fork and inference; the existing Codex editor owns
+native `thread/sample` inference from the loaded source conversation; the existing Codex editor owns
 the gray suggestion and Tab behavior. A small compatibility controller connects
 those existing interfaces for verified local API connections. It is not a copy
 of the official main-process prediction controller or its remote configuration.
+
+The sampling method is also used by the official prediction controller. Cockpit
+calls it through the app's existing renderer IPC; this does not convert that IPC
+into the main process's private internal-request channel. Unlike the previous
+renderer fork implementation, it creates no ordinary temporary conversation or
+prediction turn for the renderer to treat as user work.
 
 ChatGPT-authenticated, remote, SSH, and cloud connections retain their original
 behavior. The original **Show predictions** preference is respected. Unknown
@@ -27,30 +33,39 @@ chat and independently supported Cockpit enhancements.
 
 ## Request lifecycle
 
-The source thread is resumed and its latest turn checked before creating an
-ephemeral fork with `experimentalPredictionMode`. The fork inherits the source
-model, provider, and conversation context. A short prediction instruction asks
+The source thread is resumed and its latest turn checked before calling
+`thread/sample` with its `threadId` and `expectedTurnId`. The native sampler
+inherits the source model, provider, and conversation context; the adapter does
+not replay history or override the model/provider. A short prediction instruction asks
 for JSON containing one `suggestion` string or `null` and explicitly forbids
 acting on the source conversation or calling tools.
 
 Requests are deduplicated by source turn, with one active prediction per thread,
 a 45-second deadline, and no automatic retry. New turns, account/provider
 changes, disabling the option, and runtime disposal cancel pending work. Late
-results are discarded. Temporary subscriptions and forks are released in the
-completion and failure paths; the source thread is never interrupted.
+results are discarded. The response must contain the matching `sourceTurnId`
+and a real `responseId`; no prediction thread or turn IDs are fabricated.
 
-Like the native prediction helper, all exit paths synchronously release local
-timers and subscriptions, then dispatch server cleanup without waiting for RPC
-acknowledgements. An unfinished prediction is interrupted before unsubscribe is
-dispatched; an already terminal turn is not interrupted again. Predictions are
-still delivered only after `turn/completed`, not when an intermediate message
-first looks complete. A finished result does not wait for server unsubscribe.
-An old task can remove only its own active-job entry, including when a new task
-has reacquired the same source turn.
+Each sample owns its JSON-RPC ID. Cancellation releases local listeners and
+ends the local request first, then abandons the queued IPC request and sends
+`thread/sample/cancel` for that same ID. The existing 45-second wall-clock timer
+is independent of IPC queue expiration. Network cancellation never blocks local
+result delivery, and the source turn is never interrupted. An old task can
+remove only its own active-job entry. Unsupported sampling does not fall back
+to the previous renderer fork path.
 
-The native `experimentalDisablePredictionMcp` option is used where supported.
-It is not a universal server-side tool prohibition. Unexpected tool or approval
-requests terminate the prediction rather than continue the source task.
+The native `disableMcp` option applies where the inherited incremental-tool
+window supports it; it is not a universal server-side tool prohibition. The
+sampling response uses `text: null` when a tool call was attempted or no text
+was produced, and an empty response is not published as a suggestion.
+
+## Normal task notifications
+
+Normal completion notifications and their user preferences are unchanged.
+There is no notification filter, global mute, or replacement toast. Earlier
+renderer prediction forks could enter the ordinary completion path and expose
+their JSON as a notification; the sampling path avoids creating that ordinary
+renderer conversation rather than suppressing its notification afterward.
 
 ## Verification and reports
 
@@ -66,11 +81,55 @@ Compatibility reports should contain the Cockpit and Codex versions, the
 adapter status/reason, and sanitized test results. Do not include credentials,
 provider endpoints, real conversations, or copied official application modules.
 
-### Local acceptance record
+### Sampling preflight
+
+The installed app-server `0.164.0-alpha.11.1` was tested with the current API
+model/provider in an isolated synthetic source. Sampling returned a valid
+suggestion and matching source ID in about 5.4 seconds. The original request of
+a second sample returned `sample canceled` after cancellation; an empty cancel
+acknowledgement alone was not counted as proof. Source turns remained unchanged,
+and sampling emitted no ordinary turn-start, turn-complete, or message-delta events.
+
+In the unmodified official desktop app, a transparent test observer forwarded
+the ordinary completion notification and received its real native `onShown`
+callback. A successful renderer sampling request then produced no additional
+notification calls or native callbacks during a dedicated 5.4-second window.
+The observer did not discard calls, and its original host reference and the
+isolated notification preference were restored after the test. These are
+preflight results; corrected-adapter acceptance is recorded separately below.
+
+### Corrected sampling adapter acceptance
+
+The v2 adapter generated both catch-up and automatic live predictions through
+the official sampler. Real `responseId` and matching source-turn metadata were
+observed, and the native `cumberbatch` plugin displayed the suggestion. Actual
+Tab acceptance inserted the exact editable draft without changing message
+counts. Existing-draft, Chinese IME, and running-turn stale-suggestion checks
+also passed.
+
+With this adapter enabled, the ordinary synthetic task produced one forwarded
+completion notification and one real native `onShown` callback. Its automatic
+live prediction then succeeded without any additional notification calls or
+native callbacks during a dedicated 5577.8 ms post-success window. The observer
+forwarded every call and restored the original host reference afterward; no
+notification filter or global mute was used.
+
+An actual in-flight adapter request was also cancelled through the renderer
+IPC path. The same request ID was observed at sample dispatch, enqueue ACK,
+abandon, and `thread/sample/cancel`; the original sample returned
+`-32603: sample canceled`, not merely a queued-request error or cancel ACK.
+Source turns remained unchanged, and no source turn was interrupted.
+
+The updated adapter/module graph suite passed 33 tests. The complete enhancement
+CJS suite passed 136 tests, with 15 optional artifact checks skipped and no
+failures. The standard Windows release build, including its required TypeScript
+checks, also passed. Unrelated initial tests below were not additionally rerun.
+
+### Initial fork implementation acceptance (historical)
 
 The adapter was exercised on Windows with Codex desktop `26.1021.31345`
 (build `21828`) and an API-backed local synthetic conversation. The installed
-official app files were not changed. The final source produced a suggestion
+official app files were not changed. That version produced a suggestion
 through a native ephemeral prediction fork and the existing `cumberbatch`
 editor plugin. Actual Tab key input changed the empty editor document into the
 suggested editable draft; the submitted user/assistant message counts stayed
@@ -122,12 +181,12 @@ process remained open and its installed ASAR hash was unchanged. Activating the
 feature in an already open Codex document still requires restarting that
 instance through Cockpit when idle.
 
-### Cleanup timing follow-up
+### Cleanup timing follow-up (historical fork implementation)
 
 A read-only comparison with the installed native prediction helper confirmed
 that local listeners are released synchronously and server interrupt/unsubscribe
 acknowledgements are not awaited before completing the request. The compatibility
-adapter now follows that order for successful, cancelled, and failed requests.
+adapter at that stage followed that order for successful, cancelled, and failed requests.
 It also avoids interrupting an already terminal turn and compares existing job
 promise identities so an old disposed task cannot remove a reacquired task for
 the same source turn. No model, prompt, generation trigger, editor, or retry

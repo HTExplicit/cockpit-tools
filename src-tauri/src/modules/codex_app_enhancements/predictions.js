@@ -1,13 +1,13 @@
 /*
  * Native composer prediction compatibility for verified local API connections.
  * The desktop client owns the editor, gray suggestion and Tab key handler.
- * This adapter only coordinates its existing app-server prediction fork RPCs.
+ * This adapter only coordinates the existing app-server thread/sample RPC.
  * No provider URL, key, HTTP inference client or DOM editor implementation lives here.
  */
 (() => {
   "use strict";
   const root = typeof window === "object" ? window : globalThis;
-  const VERSION = "cockpit-native-predictions-v1";
+  const VERSION = "cockpit-native-predictions-v2";
   if (root.__cockpitNativePredictions?.version === VERSION) {
     root.__cockpitNativePredictions.runtime.update();
     const state = root.__cockpitEnhancements;
@@ -122,10 +122,8 @@
     previous?.cancel("superseded");
     const epoch = generation;
     const controller = new AbortController();
-    let forkId = null, turnId = null, finished = false, cleaned = false, closed = false;
-    let latestOutput = "", settled = false;
+    let sampleId = null, sampleAck = null, finished = false, cleaned = false, closed = false;
     const listeners = [];
-    const buffered = [];
     let resolveCompletion, rejectCompletion;
     const completion = new Promise((resolve, reject) => { resolveCompletion = resolve; rejectCompletion = reject; });
     completion.catch(() => {});
@@ -138,6 +136,7 @@
       diagnostic.cancelled++;
       controller.abort();
       rejectCompletion(abortError());
+      cleanup();
     };
     const timed = setTimeout(cancel, TIMEOUT);
     const wait = value => new Promise((resolve, reject) => {
@@ -151,46 +150,23 @@
     });
     const request = (method, params) => {
       if (!current()) throw abortError();
-      const response = Promise.resolve(manager.sendRequest(method, params, { priority: "background", source: "composer_predictions", timeoutMs: TIMEOUT }));
-      // A timed-out request can still create a fork or start its turn. Reclaim
-      // those late results rather than leaving an unobserved prediction alive.
-      response.then(result => {
-        if (current()) return;
-        if (method === "thread/fork" && result?.thread?.id && result.thread.id !== target.threadId)
-          Promise.resolve(manager.sendRequest("thread/unsubscribe", { threadId: result.thread.id }, { timeoutMs: 2000 })).catch(() => {});
-        if (method === "turn/start" && result?.turn?.id && params.threadId !== target.threadId)
-          Promise.resolve(manager.sendRequest("turn/interrupt", { threadId: params.threadId, turnId: result.turn.id }, { timeoutMs: 2000 })).catch(() => {});
-      }, () => {});
-      return wait(response);
+      return wait(Promise.resolve().then(() => manager.sendRequest(method, params,
+        { priority: "background", source: "composer_predictions", timeoutMs: TIMEOUT })));
     };
     const onNotification = message => {
       const params = message?.params;
-      if (!params || controller.signal.aborted || finished) return;
+      if (!params || closed || controller.signal.aborted) return;
       if (message.method === "account/updated") { cancel(); return; }
       if ((message.method === "turn/started" || message.method === "thread/deleted")
         && params.threadId === target.threadId) { cancel(); return; }
-      if (params.threadId !== forkId) return;
-      if (turnId == null) {
-        if (buffered.length >= 256 || typeof params.delta === "string" && params.delta.length > 4096) cancel();
-        else buffered.push(message);
-        return;
-      }
-      if (params.turnId != null && params.turnId !== turnId || params.turn?.id != null && params.turn.id !== turnId) return;
-      if (message.method === "item/agentMessage/delta") {
-        if (typeof params.delta === "string") latestOutput += params.delta;
-        if (latestOutput.length > 4096) cancel();
-      } else if (message.method === "item/completed" && params.item?.type === "agentMessage") {
-        if (typeof params.item.text === "string") latestOutput = params.item.text;
-      } else if (message.method === "item/started" && !["userMessage", "agentMessage", "reasoning"].includes(params.item?.type)) {
-        // Prediction forks inherit native tools. A model requesting one is not a suggestion.
-        cancel();
-      } else if (message.method === "turn/completed") {
-        if (settled) return;
-        settled = true;
-        finished = params.turn?.status === "completed";
-        if (finished) resolveCompletion();
-        else rejectCompletion(new Error("Prediction did not complete"));
-      }
+    };
+    const onResponse = event => {
+      const data = event?.data, message = data?.message;
+      if (closed || finished || data?.type !== "mcp-response" || data.hostId !== target.hostId
+        || sampleId == null || message?.id !== sampleId) return;
+      finished = true;
+      if (message.error != null) rejectCompletion(new Error(message.error.message || "Prediction sample failed"));
+      else resolveCompletion(message.result);
     };
     const cleanup = () => {
       if (cleaned) return;
@@ -198,13 +174,15 @@
       clearTimeout(timed);
       closed = true;
       for (const listener of listeners) disposeValue(listener);
-      // Native prediction cleanup releases local listeners before dispatching
-      // interrupt/unsubscribe, without waiting for their RPC acknowledgements.
-      if (forkId) {
-        if (!settled && turnId) {
-          try { manager.sendRequest("turn/interrupt", { threadId: forkId, turnId }, { priority: "background", timeoutMs: 2000 }).catch(() => {}); } catch { /* already ended/disconnected */ }
-        }
-        try { manager.sendRequest("thread/unsubscribe", { threadId: forkId }, { priority: "background", timeoutMs: 2000 }).catch(() => {}); } catch { /* disconnected */ }
+      if (sampleId && !finished) {
+        // Retire locally before reclaiming a queued or dispatched sample. The
+        // abandon acknowledgement orders the IPC queue ahead of worker cancel.
+        const requestId = sampleId;
+        Promise.resolve(sampleAck).catch(() => {}).then(async () => {
+          try { await root.electronBridge.sendMessageFromView({ type: "mcp-request-abandon", hostId: target.hostId, requestId }); } catch { /* still cancel a dispatched sample */ }
+          try { await manager.sendRequest("thread/sample/cancel", { requestId },
+            { priority: "critical", source: "composer_predictions", coalesce: false }); } catch { /* already ended/disconnected */ }
+        }).catch(() => {});
       }
     };
     const promise = Promise.resolve().then(async () => {
@@ -219,9 +197,12 @@
         if (!await currentSource(manager, target, wait) || !current()) return null;
         if (typeof scope.watch === "function") {
           const unwatch = scope.watch(read => { if (!nativeOptionEnabled(read?.get ? { get: read.get } : scope)) cancel(); });
-          if (typeof unwatch === "function") listeners.push({ [Symbol.dispose]: unwatch });
+          if (typeof unwatch === "function") {
+            if (closed) unwatch();
+            else listeners.push({ [Symbol.dispose]: unwatch });
+          }
         }
-        // Register before starting the fork turn; its events may precede turn/start's response.
+        if (!current()) throw abortError();
         const subscribe = async request => {
           const subscription = manager.subscribe(request);
           listeners.push(subscription);
@@ -234,45 +215,42 @@
           }
         };
         await subscribe({ type: "notification", key: { hostId: target.hostId },
-          methods: ["account/updated", "turn/started", "thread/deleted", "item/started", "item/agentMessage/delta", "item/completed", "turn/completed"], listener: onNotification });
-        for (const event of ["approval-request", "user-input-request", "mcp-elicitation-request", "auth-status"]) {
-          await subscribe({ type: "event", key: { hostId: target.hostId }, event, listener: value => {
-            if (event === "auth-status") { cancel(); return; }
-            const requestThreadId = value?.conversationId ?? value?.threadId ?? value?.params?.threadId;
-            if (forkId != null && requestThreadId === forkId) cancel();
-          } });
-        }
+          methods: ["account/updated", "turn/started", "thread/deleted"], listener: onNotification });
+        await subscribe({ type: "event", key: { hostId: target.hostId }, event: "auth-status", listener: cancel });
         if (!current()) throw abortError();
         const resumed = await request("thread/resume", { threadId: target.threadId, excludeTurns: true });
         if (resumed?.collaborationMode?.mode === "plan" || !resumed?.model || !resumed?.modelProvider
           || resumed.thread?.id !== target.threadId || resumed.thread.status?.type !== "idle"
           || !await currentSource(manager, target, wait)) return null;
-        const fork = await request("thread/fork", { threadId: target.threadId, experimentalPredictionMode: true,
-          experimentalDisablePredictionMcp: true, ephemeral: true, excludeTurns: true,
-          config: { thread_unload_delay_secs: 10 }, threadSource: "composer_predictions" });
-        const candidateForkId = fork?.thread?.id;
-        if (!candidateForkId || candidateForkId === target.threadId) throw new Error("Unsupported prediction fork");
-        forkId = candidateForkId;
-        if (fork.thread.ephemeral !== true
-          || fork.modelProvider !== resumed.modelProvider || fork.model !== resumed.model) throw new Error("Unsupported prediction fork");
-        const started = await request("turn/start", { threadId: forkId,
-          input: [{ type: "text", text: PROMPT, text_elements: [] }], outputSchema: null, effort: "low",
+        if (typeof root.electronBridge?.sendMessageFromView !== "function") throw new Error("Prediction sample bridge unavailable");
+        sampleId = `thread/sample:${root.crypto.randomUUID()}`;
+        root.addEventListener("message", onResponse);
+        listeners.push({ [Symbol.dispose]: () => root.removeEventListener("message", onResponse) });
+        const params = { threadId: target.threadId, expectedTurnId: target.latestTurnId, prompt: PROMPT, effort: "low",
           turnTrigger: "composer_predictions", responsesapiClientMetadata: {
             prediction_source_thread_id: target.threadId, prediction_source_turn_id: target.latestTurnId,
             prediction_trigger: target.generationTrigger,
-          } });
-        turnId = started?.turn?.id;
-        if (!turnId) throw new Error("Prediction turn unavailable");
-        for (const message of buffered.splice(0)) onNotification(message);
-        await completion;
+          }, disableMcp: true };
+        // The bridge acknowledgement only confirms enqueueing. The response
+        // listener is registered first because a result may precede that ACK.
+        sampleAck = Promise.resolve().then(() => {
+          if (!current()) throw abortError();
+          return root.electronBridge.sendMessageFromView({ type: "mcp-request", hostId: target.hostId,
+            request: { id: sampleId, method: "thread/sample", params }, priority: "background",
+            source: "composer_predictions", timeoutMs: TIMEOUT, coalesce: false });
+        });
+        sampleAck.catch(rejectCompletion);
+        const sampled = await wait(completion);
+        if (typeof sampled?.responseId !== "string" || sampled.responseId.length === 0
+          || sampled.sourceTurnId !== target.latestTurnId) throw new Error("Unsupported prediction sample");
         if (!current() || !isApiAuth(await wait(manager.getAuthMethod()))
           || !await currentSource(manager, target, wait)) return null;
         const finalContext = await wait(manager.getFollowUpContext(target.threadId));
         if (finalContext.modelProvider != null && finalContext.modelProvider !== resumed.modelProvider) return null;
-        const text = normalizeSuggestion(latestOutput);
+        const text = normalizeSuggestion(sampled.text);
         const result = text == null ? null : { requestedAt: new Date().toISOString(), hostKind: "local", text,
-          predictionThreadId: forkId, predictionTurnId: turnId, generationTrigger: target.generationTrigger,
-          sourceTurnId: target.latestTurnId, model: resumed.model, reasoningEffort: "low",
+          responseId: sampled.responseId, generationTrigger: target.generationTrigger,
+          sourceTurnId: sampled.sourceTurnId, model: resumed.model, reasoningEffort: "low",
           parentReasoningEffort: resumed.reasoningEffort, serviceTier: resumed.serviceTier,
           configuredReasoningEffort: "low", promptVersion: VERSION };
         completed.set(key, result);
