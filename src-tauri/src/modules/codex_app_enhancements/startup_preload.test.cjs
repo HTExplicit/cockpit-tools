@@ -10,13 +10,18 @@ const initialUrl = 'app://-/assets/app-initial-fixture.js';
 const primaryUrl = 'app://-/assets/app-primary-fixture.js';
 
 function run({ documentElement = null, pathname = '/index.html', initialMode = 'full',
-  quotaFailure = null, primaryFailure = null, fastOnlyFailure = null, missingPrimary = false } = {}) {
+  quotaFailure = null, primaryFailure = null, fastOnlyFailure = null, missingPrimary = false,
+  wrappedEntry = false, discoveryFailure = null } = {}) {
   const files = new Map([
     ['app://-/index.html', `<script type="module" src="./assets/index-fixture.js"></script>`],
     [indexUrl, `import "./app-initial-fixture.js";`],
     [initialUrl, `const primary="./app-primary-fixture.js";`],
     [primaryUrl, `export const value = 1;`],
   ]);
+  if (wrappedEntry) {
+    files.set(indexUrl, 'import "./app-main-fixture.js";');
+    files.set('app://-/assets/app-main-fixture.js', 'import "./app-initial-fixture.js";');
+  }
   if (missingPrimary) files.delete(primaryUrl);
   const calls = [];
   const root = {
@@ -40,6 +45,16 @@ function run({ documentElement = null, pathname = '/index.html', initialMode = '
         return entry
           ? /^app:\/\/-\/assets\/index-[A-Za-z0-9_-]+\.js$/.test(url)
           : /^app:\/\/-\/assets\/app-initial-[A-Za-z0-9_-]+\.js$/.test(url);
+      },
+      discoverInitialModuleSync(entries, read) {
+        calls.push(['initial-discovery', entries]);
+        if (discoveryFailure) return {ok: false, reason: discoveryFailure};
+        const seeds = entries.map(url => ({url, source: read(url)}));
+        if (wrappedEntry) {
+          const url = 'app://-/assets/app-main-fixture.js';
+          seeds.push({url, source: read(url)});
+        }
+        return {ok: true, url: initialUrl, source: read(initialUrl), seeds};
       },
       prepareLive(value, url) {
         return { ok: true, url, mode: initialMode,
@@ -95,6 +110,21 @@ test('preloads both modules synchronously before the document starts', () => {
   assert.equal(install[2][0].url, primaryUrl);
   assert.equal(install[3], 'full');
   assert.match(install[2][0].source, /__cockpitNativeFastComplete\?\.\("quota"\)/);
+});
+
+test('startup delegates indirect initial discovery to the shared synchronous helper', () => {
+  const {root, calls} = run({wrappedEntry: true});
+  assert.equal(root.__cockpitStartupPreload.ok, true);
+  const discovery = calls.find(([kind]) => kind === 'initial-discovery');
+  assert.deepEqual(Array.from(discovery[1]), [indexUrl]);
+  assert.equal(calls.find(([kind]) => kind === 'install')[1], initialUrl);
+});
+
+test('failed initial discovery never transforms or installs a partial startup graph', () => {
+  const {root, calls} = run({discoveryFailure: 'ambiguous-module'});
+  assert.equal(root.__cockpitStartupPreload.ok, false);
+  assert.equal(root.__cockpitStartupPreload.reason, 'ambiguous-module');
+  assert.equal(calls.some(([kind]) => ['initial-transform', 'composer-transform', 'install'].includes(kind)), false);
 });
 
 test('never prepares an already started document', () => {

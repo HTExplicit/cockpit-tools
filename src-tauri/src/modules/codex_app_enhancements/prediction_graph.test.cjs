@@ -9,7 +9,7 @@ const preloadSource = fs.readFileSync(path.join(__dirname, 'startup_preload.js')
 const base = 'app://-/assets/';
 const initialUrl = base + 'app-initial-fixture.js';
 const entryUrl = base + 'index-fixture.js';
-function setup({ missing = null, duplicate = false, enabled = true } = {}) {
+function setup({ missing = null, duplicate = false, enabled = true, wrapped = false } = {}) {
   const files = new Map([
     ['app://-/index.html', '<script src="./assets/index-fixture.js"></script>'],
     [entryUrl, 'import "./app-initial-fixture.js";import "./app-main-fixture.js";'],
@@ -21,6 +21,18 @@ function setup({ missing = null, duplicate = false, enabled = true } = {}) {
     [base + 'general-settings-fixture.js', 'export const settings=1;'],
     [base + 'general-settings-other.js', 'export const settings=2;'],
   ]);
+  if (wrapped) {
+    files.set(entryUrl, 'import "./app-main-fixture.js";');
+    files.set(base + 'app-main-fixture.js', 'import "./app-initial-fixture.js";import "./app-runtime-fixture.js";');
+    files.set(base + 'app-runtime-fixture.js', 'import "./initialize-app-host-services-fixture.js";import "./settings-lazy-routes-fixture.js";');
+    files.set(initialUrl, 'import "./app-primary-fixture.js";export const initial=1;');
+    files.set(base + 'app-primary-fixture.js', 'import "./composer-content-route.js";');
+    files.set(base + 'composer-content-route.js', 'import "./app-initial-fixture.js";export {composer} from "./composer-content-fixture.js";');
+    files.set(base + 'initialize-app-host-services-fixture.js', 'import "./renderer-app-server-managers-fixture.js";');
+    files.set(base + 'renderer-app-server-managers-fixture.js', 'export const host=1;');
+    files.set(base + 'settings-lazy-routes-fixture.js', 'const routes=["./general-settings-route.js"' + (duplicate ? ',"./general-settings-other.js"' : '') + '];');
+    files.set(base + 'general-settings-route.js', 'import "./app-initial-fixture.js";export {settings} from "./general-settings-fixture.js";');
+  }
   if (missing) files.delete(base + missing);
   const transformed = [], ready = [], reads = [];
   const root = {
@@ -29,8 +41,9 @@ function setup({ missing = null, duplicate = false, enabled = true } = {}) {
     __cockpitNativePredictions: {
       transform(source, url) {
         const kind = url.includes('app-initial-') ? 'initial' : url.includes('composer-content-') ? 'composer'
-          : url.includes('initialize-app-host-services-') ? 'host' : 'settings';
+          : /(?:initialize-app-host-services|renderer-app-server-managers)-/.test(url) ? 'host' : 'settings';
         transformed.push(kind);
+        if (!source.includes('export const ' + kind + '=')) return {ok: false, diagnostics: {reason: 'synthetic-contract-missing', kind}};
         return {ok: true, patchedSource: source + '\n/*prediction-' + kind + '*/', diagnostics: {kind}};
       },
       setReady(value) { ready.push(value); },
@@ -79,6 +92,63 @@ test('async handoff and document-start preload use the same complete prediction 
   assert.equal(installed.url, initialUrl);
   assert.equal(installed.modules.length, 3);
   assert.deepEqual(ready, [], 'graph commit, not source preparation, activates native service');
+});
+
+test('shared initial discovery follows app-main loaders in sync and async paths', async () => {
+  const {root, files, read, reads} = setup({wrapped: true});
+  files.set(entryUrl, files.get(entryUrl) + 'import "./unrelated-chunk.js";');
+  const sync = root.__cockpitNativeFast.discoverInitialModuleSync([entryUrl], read);
+  const asyncResult = await root.__cockpitNativeFast.discoverInitialModule([entryUrl], async url => read(url));
+  for (const result of [sync, asyncResult]) {
+    assert.equal(result.ok, true);
+    assert.equal(result.url, initialUrl);
+    assert.equal(result.source, files.get(initialUrl));
+    assert.ok(result.seeds.some(seed => seed.url === base + 'app-main-fixture.js'));
+  }
+  assert.equal(reads.includes(base + 'unrelated-chunk.js'), false, 'discovery stays within known loader families');
+});
+
+test('wrapper routes select the unique real contracts and keep canonical module URLs', async () => {
+  const {root} = setup({wrapped: true});
+  const prepared = await root.__cockpitNativeFast.prepareDocument();
+  assert.equal(prepared.ok, true);
+  assert.deepEqual(Array.from(prepared.modules, module => module.url), [
+    base + 'composer-content-fixture.js', base + 'renderer-app-server-managers-fixture.js',
+    base + 'general-settings-fixture.js',
+  ]);
+  let installed;
+  root.__cockpitNativeFast.installModule = (source, url, modules) => { installed = {source, url, modules}; return {ok: true}; };
+  vm.runInNewContext(preloadSource, root);
+  assert.equal(root.__cockpitStartupPreload.ok, true);
+  assert.equal(installed.url, initialUrl);
+  assert.deepEqual(Array.from(installed.modules, module => module.url), Array.from(prepared.modules, module => module.url));
+});
+
+test('missing or multiple real wrapper contracts preserve the unpatched base graph', async () => {
+  for (const options of [{wrapped: true, missing: 'composer-content-fixture.js'}, {wrapped: true, duplicate: true}]) {
+    const {root} = setup(options);
+    const result = await root.__cockpitNativeFast.prepareDocument();
+    assert.equal(result.ok, true);
+    assert.equal(result.modules.length, 0);
+    assert.doesNotMatch(result.patchedSource, /cockpit-native-predictions-graph-v1/);
+    assert.equal(root.__cockpitEnhancements.nativePredictionPatchState, 'unsupported');
+  }
+});
+
+test('initial loader discovery terminates cycles and rejects ambiguity or excessive depth', async () => {
+  const {root, files, read, reads} = setup({wrapped: true});
+  files.set(base + 'app-main-fixture.js', 'import "./app-main-second.js";');
+  files.set(base + 'app-main-second.js', 'import "./app-main-fixture.js";import "./app-initial-fixture.js";');
+  const cycle = root.__cockpitNativeFast.discoverInitialModuleSync([entryUrl], read);
+  assert.equal(cycle.ok, true);
+  assert.equal(cycle.url, initialUrl);
+  assert.equal(reads.filter(url => url === base + 'app-main-fixture.js').length, 1);
+  files.set(base + 'app-main-second.js', 'import "./app-initial-fixture.js";import "./app-initial-other.js";');
+  files.set(base + 'app-initial-other.js', 'export const initial=2;');
+  assert.equal(root.__cockpitNativeFast.discoverInitialModuleSync([entryUrl], read).ok, false);
+  files.set(entryUrl, 'import "./app-main-depth0.js";');
+  for (let i=0;i<20;i++) files.set(base + `app-main-depth${i}.js`, `import "./app-main-depth${i+1}.js";`);
+  assert.equal((await root.__cockpitNativeFast.discoverInitialModule([entryUrl], async url => read(url))).ok, false);
 });
 
 test('missing companion does not publish partial prediction edits or break the base graph', async () => {

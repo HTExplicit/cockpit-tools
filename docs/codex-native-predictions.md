@@ -31,6 +31,11 @@ behavior. The original **Show predictions** preference is respected. Unknown
 module layouts leave prediction compatibility disabled while preserving normal
 chat and independently supported Cockpit enhancements.
 
+Startup discovery follows the known local loader and companion module families,
+including re-export wrappers, and requires one matching native implementation
+for each prediction role. Both document-start preload and later preparation use
+the same initial-module discovery; asset hashes are not fixed in the adapter.
+
 ## Request lifecycle
 
 The source thread is resumed and its latest turn checked before calling

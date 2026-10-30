@@ -174,7 +174,7 @@
   function localPredictionModule(value, initialUrl, kind) {
     try {
       const url = new URL(value), initial = new URL(initialUrl);
-      const prefix = { composer: 'composer-content', host: 'initialize-app-host-services', settings: 'general-settings' }[kind];
+      const prefix = { composer: 'composer-content', host: '(?:initialize-app-host-services|renderer-app-server-managers)', settings: 'general-settings' }[kind];
       return !!prefix && localAsset(initialUrl) && url.protocol === initial.protocol && url.host === initial.host
         && !url.search && !url.hash && !url.username && !url.password
         && url.pathname.slice(0, url.pathname.lastIndexOf('/')) === initial.pathname.slice(0, initial.pathname.lastIndexOf('/'))
@@ -507,6 +507,48 @@
     if (state !== 'ready') root.__cockpitNativePredictions?.setReady?.(false);
   }
 
+  function* initialModuleGraph(entries) {
+    if (!Array.isArray(entries) || !entries.length || entries.length > 4
+      || entries.some(url => !localAsset(url, true))) return { ok: false, reason: 'unsupported-entry' };
+    const queue = [...entries], cache = new Map(), candidates = new Set();
+    let bytes = 0;
+    while (queue.length) {
+      const current = queue.shift();
+      if (cache.has(current)) continue;
+      if (cache.size >= 16) return { ok: false, reason: 'initial-graph-limit' };
+      const source = yield current;
+      if (typeof source !== 'string' || source.length > LIMIT) return { ok: false, reason: 'source-limit' };
+      bytes += source.length;
+      if (bytes > 64 * 1024 * 1024) return { ok: false, reason: 'initial-graph-limit' };
+      cache.set(current, source);
+      for (const match of source.matchAll(/["'`]\.\/((?:app-initial|app-main)-[A-Za-z0-9_-]+\.js)["'`]/g)) {
+        const target = new URL(match[1], current).href;
+        if (match[1].startsWith('app-initial-')) candidates.add(target);
+        else if (!cache.has(target)) queue.push(target);
+      }
+    }
+    if (candidates.size !== 1) return { ok: false, reason: 'ambiguous-module' };
+    if (cache.size >= 16) return { ok: false, reason: 'initial-graph-limit' };
+    const url = [...candidates][0], source = yield url;
+    if (!localAsset(url) || typeof source !== 'string' || source.length > LIMIT) return { ok: false, reason: 'source-limit' };
+    if (bytes + source.length > 64 * 1024 * 1024) return { ok: false, reason: 'initial-graph-limit' };
+    return { ok: true, url, source, seeds: [...cache].map(([url, source]) => ({ url, source })) };
+  }
+
+  function discoverInitialModuleSync(entries, read) {
+    const iterator = initialModuleGraph(entries);
+    let step = iterator.next();
+    while (!step.done) step = iterator.next(read(step.value));
+    return step.value;
+  }
+
+  async function discoverInitialModule(entries, read) {
+    const iterator = initialModuleGraph(entries);
+    let step = iterator.next();
+    while (!step.done) step = iterator.next(await read(step.value));
+    return step.value;
+  }
+
   function* predictionGraph(source, url, seeds = []) {
     if (!predictionsEnabled()) return { ok: false, reason: 'disabled' };
     const adapter = root.__cockpitNativePredictions;
@@ -514,7 +556,8 @@
     const cache = new Map([[url, source], ...seeds.map(item => [item.url, item.source])]);
     const candidates = { composer: new Set(), host: new Set(), settings: new Set() };
     const queue = [...cache.keys()], visited = new Set();
-    const families = { 'composer-content': 'composer', 'initialize-app-host-services': 'host', 'general-settings': 'settings' };
+    const families = { 'composer-content': 'composer', 'initialize-app-host-services': 'host',
+      'renderer-app-server-managers': 'host', 'general-settings': 'settings' };
     let bytes = [...cache.values()].reduce((sum, item) => sum + item.length, 0);
     while (queue.length) {
       const current = queue.shift();
@@ -527,13 +570,13 @@
         if (typeof text !== 'string' || text.length > LIMIT) return { ok: false, reason: 'prediction-source-limit' };
         bytes += text.length; cache.set(current, text);
       }
-      const pattern = /["'`]\.\/((?:app-main|app-runtime|settings-lazy-routes|composer-content|initialize-app-host-services|general-settings)-[A-Za-z0-9_-]+\.js)["'`]/g;
+      const pattern = /["'`]\.\/((?:app-main|app-runtime|app-primary|settings-lazy-routes|codex-composer-adapter|thread-composer-content-lazy|composer-content|initialize-app-host-services|renderer-app-server-managers|general-settings)-[A-Za-z0-9_-]+\.js)["'`]/g;
       for (const match of text.matchAll(pattern)) {
         const target = new URL(match[1], current).href;
         if (!target.startsWith(url.slice(0, url.lastIndexOf('/') + 1))) continue;
         const kind = Object.entries(families).find(([prefix]) => match[1].startsWith(prefix + '-'))?.[1];
         if (kind) candidates[kind].add(target);
-        else if (!visited.has(target)) queue.push(target);
+        if (!visited.has(target)) queue.push(target);
       }
     }
     const initial = adapter.transform(source, url);
@@ -573,7 +616,6 @@
 
   async function prepareDocument() {
     const document = root.document;
-    const candidates = new Set();
     const entries = [...document.scripts].map(script => script.src).filter(url => localAsset(url, true));
     if (!entries.length || entries.length > 4) return { ok: false, reason: "unsupported-entry" };
     const read = async url => {
@@ -584,18 +626,9 @@
       return source;
     };
     try {
-      const predictionSeeds = [];
-      for (const entry of entries) {
-        const entrySource = await read(entry);
-        predictionSeeds.push({url: entry, source: entrySource});
-        for (const match of entrySource.matchAll(/["'`]\.\/app-initial-[A-Za-z0-9_-]+\.js["'`]/g)) {
-          const url = new URL(match[0].slice(1, -1), entry).href;
-          if (localAsset(url)) candidates.add(url);
-        }
-      }
-      if (candidates.size !== 1) return { ok: false, reason: "ambiguous-module" };
-      const url = [...candidates][0];
-      const source = await read(url);
+      const discovered = await discoverInitialModule(entries, read);
+      if (!discovered.ok) return discovered;
+      const { url, source, seeds: predictionSeeds } = discovered;
       let result = await prepareModule(source, url);
       if (!result.ok) return { ok: false, reason: result.diagnostics?.reason || "unsupported-module" };
       const modules = [];
@@ -866,7 +899,7 @@
     return result;
   }
 
-  const api = { discardHandoff: restoreInheritedName, allow, transform, localAsset, localAdapter, functionRange, rewriteModule, rewriteModuleSync, prepareFastOnly, prepareLive, prepareModule, prepareDocument, installModule, prepareHandoff, consumeHandoff, cancelHandoff, reloadPreparedDocument,
+  const api = { discardHandoff: restoreInheritedName, allow, transform, localAsset, localAdapter, functionRange, rewriteModule, rewriteModuleSync, prepareFastOnly, prepareLive, prepareModule, discoverInitialModuleSync, discoverInitialModule, prepareDocument, installModule, prepareHandoff, consumeHandoff, cancelHandoff, reloadPreparedDocument,
     inspectStartupReload: () => {
       const guard = root.__cockpitStartupGuard;
       if (!guard) return { ok: false, reason: "startup-guard-unavailable" };
