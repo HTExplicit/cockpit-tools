@@ -105,6 +105,46 @@ Compatibility reports should contain the Cockpit and Codex versions, the
 adapter status/reason, and sanitized test results. Do not include credentials,
 provider endpoints, real conversations, or copied official application modules.
 
+### Maintained fork on v1.3.76
+
+The `HTExplicit/cockpit-tools` main branch combines this feature with upstream
+v1.3.76 at `2b5bae022c9bfcd1e537044aa0a1ca86a6a7e499`. Initial-module discovery
+uses the upstream `resolveInitialModule` and `resolveInitialModuleSync`
+implementations. Their existing read callbacks also collect the bootstrap
+sources needed by the prediction graph; the fork does not retain a second
+initial-module discovery implementation.
+
+The upstream background-renderer scheduling and acknowledged `Page.enable`
+before preload registration are preserved. Prediction-specific wrapper and
+manager-module discovery, failure propagation, and suggestion parsing remain
+covered by the enhancement tests. The existing CI regression job now runs
+those CJS tests as well.
+
+Integration regression checks passed 149 enhancement CJS tests, with 16 optional
+installed-artifact checks skipped and no failures. TypeScript typechecking,
+all 18 locale key checks, both enhancement-settings variants, and 70 targeted
+Rust enhancement/configuration checks passed. The selected modules from the
+official Windows package `26.1027.3384.0` passed prediction-only and
+prediction-with-Fast preparation: synchronous and asynchronous discovery chose
+the same initial module and three companions, and all four prepared modules
+parsed successfully.
+
+An isolated renderer smoke test used controlled synthetic sample responses,
+not model inference. Its first sample rejected without a second automatic
+request during a 1201.5 ms observation window. Navigating away and back invoked
+the existing native trigger, displayed the native gray suggestion, and accepted
+the exact 271-character multiline draft through an actual Tab keyboard event
+(`Input.dispatchKeyEvent`). The source turn count and turn-content hash stayed
+unchanged; no message was sent. The private prediction display preference and
+synthetic draft were restored after acceptance. This test does not establish
+model latency or change the native sampler's own timeout.
+
+This integration changes source only. It does not publish a release, change
+the local installation, restart an existing Codex instance, or configure a
+fork-specific updater. The updater still points to the upstream releases;
+installing an upstream release can replace this fork's enhancements. The
+prediction setting remains disabled by default.
+
 ### Sampling preflight
 
 The installed app-server `0.164.0-alpha.11.1` was tested with the current API
