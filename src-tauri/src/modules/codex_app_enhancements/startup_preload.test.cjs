@@ -9,9 +9,13 @@ const indexUrl = 'app://-/assets/index-fixture.js';
 const initialUrl = 'app://-/assets/app-initial-fixture.js';
 const primaryUrl = 'app://-/assets/app-primary-fixture.js';
 
+const discoverySandbox = { module: { exports: {} }, URL };
+vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'fast.js'), 'utf8'), discoverySandbox);
+const discovery = discoverySandbox.module.exports;
+
 function run({ documentElement = null, pathname = '/index.html', initialMode = 'full',
   quotaFailure = null, primaryFailure = null, fastOnlyFailure = null, missingPrimary = false,
-  wrappedEntry = false, discoveryFailure = null } = {}) {
+  wrappedEntry = false, ambiguousInitial = false } = {}) {
   const files = new Map([
     ['app://-/index.html', `<script type="module" src="./assets/index-fixture.js"></script>`],
     [indexUrl, `import "./app-initial-fixture.js";`],
@@ -22,6 +26,7 @@ function run({ documentElement = null, pathname = '/index.html', initialMode = '
     files.set(indexUrl, 'import "./app-main-fixture.js";');
     files.set('app://-/assets/app-main-fixture.js', 'import "./app-initial-fixture.js";');
   }
+  if (ambiguousInitial) files.set(indexUrl, 'import "./app-initial-fixture.js";import "./app-initial-other.js";');
   if (missingPrimary) files.delete(primaryUrl);
   const calls = [];
   const root = {
@@ -46,15 +51,9 @@ function run({ documentElement = null, pathname = '/index.html', initialMode = '
           ? /^app:\/\/-\/assets\/index-[A-Za-z0-9_-]+\.js$/.test(url)
           : /^app:\/\/-\/assets\/app-initial-[A-Za-z0-9_-]+\.js$/.test(url);
       },
-      discoverInitialModuleSync(entries, read) {
+      resolveInitialModuleSync(entries, read) {
         calls.push(['initial-discovery', entries]);
-        if (discoveryFailure) return {ok: false, reason: discoveryFailure};
-        const seeds = entries.map(url => ({url, source: read(url)}));
-        if (wrappedEntry) {
-          const url = 'app://-/assets/app-main-fixture.js';
-          seeds.push({url, source: read(url)});
-        }
-        return {ok: true, url: initialUrl, source: read(initialUrl), seeds};
+        return discovery.resolveInitialModuleSync(entries, read);
       },
       prepareLive(value, url) {
         return { ok: true, url, mode: initialMode,
@@ -121,7 +120,7 @@ test('startup delegates indirect initial discovery to the shared synchronous hel
 });
 
 test('failed initial discovery never transforms or installs a partial startup graph', () => {
-  const {root, calls} = run({discoveryFailure: 'ambiguous-module'});
+  const {root, calls} = run({ambiguousInitial: true});
   assert.equal(root.__cockpitStartupPreload.ok, false);
   assert.equal(root.__cockpitStartupPreload.reason, 'ambiguous-module');
   assert.equal(calls.some(([kind]) => ['initial-transform', 'composer-transform', 'install'].includes(kind)), false);

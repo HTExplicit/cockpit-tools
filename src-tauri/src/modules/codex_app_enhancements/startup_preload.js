@@ -31,9 +31,14 @@
       .map(match => new URL(match[2], indexUrl).href)
       .filter(url => fast.localAsset(url, true));
     if (entries.length < 1 || entries.length > 4) return fail('unsupported-entry');
-    const discovered = fast.discoverInitialModuleSync(entries, read);
+    const predictionSeeds = [];
+    const discovered = fast.resolveInitialModuleSync(entries, url => {
+      const source = read(url);
+      predictionSeeds.push({ url, source });
+      return source;
+    });
     if (!discovered.ok) return fail(discovered.reason);
-    const { url: initialUrl, source: initialSource, seeds: predictionSeeds } = discovered;
+    const initialUrl = discovered.url, initialSource = read(initialUrl);
     let initial = fast.prepareLive(initialSource, initialUrl);
     if (!initial.ok) return fail(initial.diagnostics?.reason || 'initial-transform-failed');
     const modules = [];

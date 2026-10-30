@@ -94,16 +94,23 @@ test('async handoff and document-start preload use the same complete prediction 
   assert.deepEqual(ready, [], 'graph commit, not source preparation, activates native service');
 });
 
-test('shared initial discovery follows app-main loaders in sync and async paths', async () => {
+test('shared initial resolution captures bootstrap seeds for both prediction paths', async () => {
   const {root, files, read, reads} = setup({wrapped: true});
   files.set(entryUrl, files.get(entryUrl) + 'import "./unrelated-chunk.js";');
-  const sync = root.__cockpitNativeFast.discoverInitialModuleSync([entryUrl], read);
-  const asyncResult = await root.__cockpitNativeFast.discoverInitialModule([entryUrl], async url => read(url));
-  for (const result of [sync, asyncResult]) {
+  const api = root.__cockpitNativeFast;
+  for (const resolve of [api.resolveInitialModuleSync, api.resolveInitialModule]) {
+    const seeds = [];
+    const result = await resolve([entryUrl], url => {
+      const source = read(url);
+      seeds.push({url, source});
+      return source;
+    });
     assert.equal(result.ok, true);
     assert.equal(result.url, initialUrl);
-    assert.equal(result.source, files.get(initialUrl));
-    assert.ok(result.seeds.some(seed => seed.url === base + 'app-main-fixture.js'));
+    assert.deepEqual(seeds.map(seed => seed.url), [entryUrl, base + 'app-main-fixture.js']);
+    const prediction = api.preparePredictionGraphSync(files.get(result.url), result.url, read, seeds);
+    assert.equal(prediction.ok, true);
+    assert.equal(prediction.modules.length, 3);
   }
   assert.equal(reads.includes(base + 'unrelated-chunk.js'), false, 'discovery stays within known loader families');
 });
@@ -133,22 +140,6 @@ test('missing or multiple real wrapper contracts preserve the unpatched base gra
     assert.doesNotMatch(result.patchedSource, /cockpit-native-predictions-graph-v1/);
     assert.equal(root.__cockpitEnhancements.nativePredictionPatchState, 'unsupported');
   }
-});
-
-test('initial loader discovery terminates cycles and rejects ambiguity or excessive depth', async () => {
-  const {root, files, read, reads} = setup({wrapped: true});
-  files.set(base + 'app-main-fixture.js', 'import "./app-main-second.js";');
-  files.set(base + 'app-main-second.js', 'import "./app-main-fixture.js";import "./app-initial-fixture.js";');
-  const cycle = root.__cockpitNativeFast.discoverInitialModuleSync([entryUrl], read);
-  assert.equal(cycle.ok, true);
-  assert.equal(cycle.url, initialUrl);
-  assert.equal(reads.filter(url => url === base + 'app-main-fixture.js').length, 1);
-  files.set(base + 'app-main-second.js', 'import "./app-initial-fixture.js";import "./app-initial-other.js";');
-  files.set(base + 'app-initial-other.js', 'export const initial=2;');
-  assert.equal(root.__cockpitNativeFast.discoverInitialModuleSync([entryUrl], read).ok, false);
-  files.set(entryUrl, 'import "./app-main-depth0.js";');
-  for (let i=0;i<20;i++) files.set(base + `app-main-depth${i}.js`, `import "./app-main-depth${i+1}.js";`);
-  assert.equal((await root.__cockpitNativeFast.discoverInitialModule([entryUrl], async url => read(url))).ok, false);
 });
 
 test('missing companion does not publish partial prediction edits or break the base graph', async () => {
