@@ -126,6 +126,21 @@ test("all four synthetic native contracts transform together without fixed symbo
   } finally { env.stop(); }
 });
 
+test("the relocated native manager module retains the same host contract", () => {
+  const env = environment();
+  try {
+    const url = "app://-/assets/renderer-app-server-managers-fixture.js";
+    const result = env.api.transform(fixtures.host, url);
+    assert.equal(result.ok, true);
+    assert.equal(result.diagnostics.kind, "host");
+    assert.ok(result.patchedSource.includes("__cockpitNativePredictionContract:host:v1"));
+    assert.doesNotThrow(() => new vm.Script(result.patchedSource));
+    assert.equal(env.api.transform(`${fixtures.host}\n${fixtures.host}`, url).ok, false);
+    const wrapper = 'export { background } from "./renderer-app-server-managers-content.js";';
+    assert.equal(env.api.transform(wrapper, url).ok, false);
+  } finally { env.stop(); }
+});
+
 test("ambiguous, missing and reinstalled contracts fail without a partial source", () => {
   const env = environment();
   try {
@@ -157,12 +172,13 @@ test("readiness and verified API flags are both required", async () => {
   } finally { env.stop(); }
 });
 
-test("a synchronous auth failure returns null and removes its initialized job", async () => {
+test("a synchronous auth failure rejects and removes its initialized job", async () => {
   const env = environment(), fake = nativeManager();
-  fake.manager.getAuthMethod = () => { throw new Error("Auth unavailable"); };
+  const failure = new Error("Auth unavailable");
+  fake.manager.getAuthMethod = () => { throw failure; };
   try {
     const pending = activate(env, fake).requestUserMessagePrediction(target);
-    assert.equal(await pending, null);
+    await assert.rejects(pending, error => error === failure);
     assert.equal(env.api.runtime.status().inFlight, 0);
     assert.equal(env.api.runtime.status().reason, "request-failed");
     assert.deepEqual(fake.calls, []);
@@ -549,46 +565,65 @@ test("only a matching local mcp-response completes a sample", async () => {
   } finally { env.stop(); }
 });
 
-test("missing IDs, wrong source turns and unsupported sample errors fail once without fallback", async () => {
-  for (const mode of ["response-id", "source-turn", "unsupported"]) {
+test("sample failures reject without automatic retry and a new native request can succeed", async () => {
+  for (const mode of ["response-id", "source-turn", "unsupported", "backend-timeout"]) {
     const env = environment(), fake = nativeManager({ bridge(payload, context) {
       if (payload.type !== "mcp-request") return;
-      if (mode === "unsupported") context.emit({ type: "mcp-response", hostId: "local",
-        message: { id: payload.request.id, error: { code: -32601, message: "Method not found" } } });
+      if (context.samples.length !== 1) return;
+      if (mode === "unsupported" || mode === "backend-timeout") context.emit({ type: "mcp-response", hostId: "local",
+        message: { id: payload.request.id, error: mode === "unsupported"
+          ? { code: -32601, message: "Method not found" } : { code: -32603, message: "sample timed out" } } });
       else context.respond(payload.request.id, sampleResult(mode === "response-id" ? { responseId: null } : { sourceTurnId: "stale-turn" }));
       return Promise.resolve({});
     } });
     try {
       const service = activate(env, fake);
-      assert.equal(await service.requestUserMessagePrediction(target), null);
+      await assert.rejects(service.requestUserMessagePrediction(target),
+        /Unsupported prediction sample|Method not found|sample timed out/);
       assert.equal(env.api.runtime.status().reason, "request-failed");
-      assert.equal(await service.requestUserMessagePrediction(target), null);
+      assert.equal(env.api.runtime.status().completed, 0);
+      await new Promise(resolve => setImmediate(resolve));
       assert.equal(env.samples.length, 1);
       assert.deepEqual(fake.calls.map(call => call.method), ["thread/resume"]);
       assert.equal(fake.listenerCount, 0);
       assert.equal(env.messages.size, 0);
+      assert.equal(env.timers.size, 0);
+      assert.equal(env.api.runtime.status().inFlight, 0);
+      const next = service.requestUserMessagePrediction(target);
+      assert.equal(service.requestUserMessagePrediction(target), next);
+      assert.equal((await next).text, "Inspect the next diagnostic result.");
+      assert.equal(env.samples.length, 2);
+      assert.equal((await service.requestUserMessagePrediction(target)).text, "Inspect the next diagnostic result.");
+      assert.equal(env.samples.length, 2);
     } finally { env.stop(); }
   }
 });
 
-test("a missing or failed bridge returns null through the existing diagnostic", async () => {
+test("a missing or failed bridge rejects without caching an empty result", async () => {
   for (const mode of ["missing", "throw", "reject"]) {
+    let failBridge = true;
     const env = environment(), fake = nativeManager({ bridge(payload) {
-      if (payload.type !== "mcp-request") return;
+      if (payload.type !== "mcp-request" || !failBridge) return;
       if (mode === "throw") throw new Error("Bridge disconnected");
       return Promise.reject(new Error("Bridge disconnected"));
     } });
     try {
       const service = activate(env, fake);
+      const originalBridge = env.context.electronBridge;
       if (mode === "missing") delete env.context.electronBridge;
-      assert.equal(await service.requestUserMessagePrediction(target), null);
+      await assert.rejects(service.requestUserMessagePrediction(target),
+        /Prediction sample bridge unavailable|Bridge disconnected/);
       assert.equal(env.api.runtime.status().reason, "request-failed");
-      assert.equal(await service.requestUserMessagePrediction(target), null);
+      assert.equal(env.api.runtime.status().completed, 0);
+      await new Promise(resolve => setImmediate(resolve));
       assert.equal(env.samples.length, mode === "missing" ? 0 : 1);
       assert.equal(fake.listenerCount, 0);
       assert.equal(env.messages.size, 0);
       assert.equal(env.api.runtime.status().inFlight, 0);
-      await new Promise(resolve => setImmediate(resolve));
+      if (mode === "missing") env.context.electronBridge = originalBridge;
+      failBridge = false;
+      assert.equal((await service.requestUserMessagePrediction(target)).text, "Inspect the next diagnostic result.");
+      assert.equal(env.samples.length, mode === "missing" ? 1 : 2);
     } finally { env.stop(); }
   }
 });
@@ -612,9 +647,9 @@ test("final auth, source turn and provider checks can discard a completed sample
   }
 });
 
-test("null sample text and malformed or long suggestions never publish", async () => {
-  const inputs = [null, "not JSON", '{"suggestion":"x","extra":true}', '{"suggestion":false}',
-    JSON.stringify({ suggestion: "x".repeat(201) }), '{"suggestion":null}', '{"suggestion":"line\\nbreak"}', '{"suggestion":" "}'];
+test("legitimate null and trimmed empty suggestions stay cached as successful empty results", async () => {
+  const inputs = ['{"suggestion":null}', '{"suggestion":" "}', '{"suggestion":"\\r\\n\\t "}',
+    '{"suggestion":null,"extra":true}'];
   for (const text of inputs) {
     const env = environment(), fake = nativeManager({ text });
     try {
@@ -626,6 +661,52 @@ test("null sample text and malformed or long suggestions never publish", async (
       assert.equal(env.samples.length, 1);
       assert.equal(fake.listenerCount, 0);
       assert.equal(env.messages.size, 0);
+    } finally { env.stop(); }
+  }
+});
+
+test("native string suggestions retain long, multiline and control-character content", async () => {
+  const suggestions = ["x".repeat(201), "line\nbreak", "line\r\nbreak", "with\ttab\u0000inside"];
+  for (const suggestion of suggestions) {
+    const env = environment(), fake = nativeManager({ text: JSON.stringify({ suggestion: `  ${suggestion}  `, extra: true }) });
+    try {
+      const service = activate(env, fake);
+      const result = await service.requestUserMessagePrediction(target);
+      assert.equal(result.text, suggestion);
+      assert.equal(env.api.runtime.status().reason, "completed");
+      assert.equal((await service.requestUserMessagePrediction(target)).text, suggestion);
+      assert.equal(env.samples.length, 1);
+      assert.equal(fake.listenerCount, 0);
+      assert.equal(env.messages.size, 0);
+    } finally { env.stop(); }
+  }
+});
+
+test("invalid JSON and native suggestion schema failures reject instead of caching null", async () => {
+  const inputs = [null, undefined, "not JSON", "null", "false", "1", '"text"', "[]", "{}",
+    '{"suggestion":false}', '{"suggestion":1}', '{"suggestion":[]}', '{"suggestion":{}}',
+    '```json\n{"suggestion":"valid only without fences"}\n```'];
+  for (const text of inputs) {
+    const env = environment(), fake = nativeManager({ bridge(payload, context) {
+      if (payload.type !== "mcp-request" || context.samples.length !== 1) return;
+      const result = sampleResult({ text });
+      if (text === undefined) delete result.text;
+      context.respond(payload.request.id, result);
+      return Promise.resolve({});
+    } });
+    try {
+      const service = activate(env, fake);
+      await assert.rejects(service.requestUserMessagePrediction(target));
+      assert.equal(env.api.runtime.status().reason, "request-failed");
+      assert.equal(env.api.runtime.status().completed, 0);
+      assert.equal(env.api.runtime.status().inFlight, 0);
+      assert.equal(fake.listenerCount, 0);
+      assert.equal(env.messages.size, 0);
+      assert.equal(env.timers.size, 0);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(env.samples.length, 1);
+      assert.equal((await service.requestUserMessagePrediction(target)).text, "Inspect the next diagnostic result.");
+      assert.equal(env.samples.length, 2);
     } finally { env.stop(); }
   }
 });

@@ -40,11 +40,29 @@ not replay history or override the model/provider. A short prediction instructio
 for JSON containing one `suggestion` string or `null` and explicitly forbids
 acting on the source conversation or calling tools.
 
+The request includes `effort: "low"`, but that is a requested value, not proof
+of the effective reasoning effort. The native sampler applies this override
+only when its provider and model support the required update; otherwise it
+inherits the source setting. The adapter does not change that backend behavior.
+
 Requests are deduplicated by source turn, with one active prediction per thread,
 a 45-second deadline, and no automatic retry. New turns, account/provider
 changes, disabling the option, and runtime disposal cancel pending work. Late
 results are discarded. The response must contain the matching `sourceTurnId`
 and a real `responseId`; no prediction thread or turn IDs are fabricated.
+
+Successful suggestions and valid empty suggestions are cached by source turn.
+Non-cancellation errors reject the request and are not cached as successful
+empty results. A later request from the existing native flow may sample that
+source again; the adapter never schedules a retry itself. Cancellation retains
+the existing local `null` result and cleanup behavior.
+
+Suggestion parsing accepts JSON with a `suggestion` string or explicit `null`,
+ignores extra fields, and trims strings. A trimmed empty string is a valid empty
+suggestion. Long or multiline strings pass intact to the native document parser;
+the adapter adds no length, single-line, or control-character rejection rules.
+Malformed JSON, non-object values, a missing field, or a wrong field type fail
+the request rather than becoming a cached empty suggestion.
 
 Each sample owns its JSON-RPC ID. Cancellation releases local listeners and
 ends the local request first, then abandons the queued IPC request and sends
@@ -57,7 +75,8 @@ to the previous renderer fork path.
 The native `disableMcp` option applies where the inherited incremental-tool
 window supports it; it is not a universal server-side tool prohibition. The
 sampling response uses `text: null` when a tool call was attempted or no text
-was produced, and an empty response is not published as a suggestion.
+was produced. A null or missing response text is a request failure, distinct
+from the valid empty suggestion encoded as `{"suggestion": null}`.
 
 ## Normal task notifications
 
