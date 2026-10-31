@@ -18,6 +18,15 @@ pub(crate) fn fingerprint(value: Option<&str>) -> Option<String> {
         .map(|v| format!("{:x}", Sha256::digest(v.as_bytes())))
 }
 
+/// An absent platform index means there is no identity maintenance to perform.
+pub(crate) fn read_maintenance_index(path: &std::path::Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 pub(crate) trait IdentitySummary {
     fn id(&self) -> &str;
     fn identity(&self) -> Option<&QueryIdentity>;
@@ -283,6 +292,34 @@ impl DedupScan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maintenance_index_missing_is_empty_without_creating_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.json");
+        assert_eq!(read_maintenance_index(&path).unwrap(), None);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn maintenance_index_reads_existing_content_and_handles_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.json");
+        let content = "{\"accounts\":[]}";
+        std::fs::write(&path, content).unwrap();
+        assert_eq!(read_maintenance_index(&path).unwrap().as_deref(), Some(content));
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(read_maintenance_index(&path).unwrap(), None);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn maintenance_index_preserves_other_io_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let expected = std::fs::read_to_string(dir.path()).unwrap_err().to_string();
+        assert_eq!(read_maintenance_index(dir.path()).unwrap_err(), expected);
+    }
+
     #[test]
     fn credentials_are_only_fingerprints_and_case_sensitive() {
         assert_eq!(fingerprint(Some(" secret ")), fingerprint(Some("secret")));

@@ -23,7 +23,11 @@ fn schedule_identity_maintenance() {
             if get_accounts_index_path()? != path {
                 return Ok(true);
             }
-            let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let Some(content) =
+                crate::modules::account_query_identity::read_maintenance_index(&path)?
+            else {
+                return Ok(true);
+            };
             let mut index: TraeAccountIndex =
                 serde_json::from_str(&content).map_err(|e| e.to_string())?;
             let (ready, changed) = crate::modules::account_query_identity::backfill(

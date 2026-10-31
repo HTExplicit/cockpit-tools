@@ -40,7 +40,11 @@ fn schedule_identity_maintenance() {
                 return Ok(true);
             }
             // Do not invoke directory repair from a background maintenance batch.
-            let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let Some(content) =
+                crate::modules::account_query_identity::read_maintenance_index(&path)?
+            else {
+                return Ok(true);
+            };
             let mut index: KiroAccountIndex =
                 serde_json::from_str(&content).map_err(|e| e.to_string())?;
             if index.identity_maintenance_version == 1
@@ -66,7 +70,12 @@ fn schedule_identity_maintenance() {
             let Ok(_guard) = KIRO_ACCOUNT_INDEX_LOCK.try_lock() else {
                 return Ok(false);
             };
-            if fs::read_to_string(&path).map_err(|e| e.to_string())? != content {
+            let Some(current) =
+                crate::modules::account_query_identity::read_maintenance_index(&path)?
+            else {
+                return Ok(true);
+            };
+            if current != content {
                 return Ok(false);
             }
             match scan.step(
