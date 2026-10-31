@@ -63,6 +63,9 @@ fn attached(session: &str, kind: &str, url: &str, waiting: bool) -> Value {
     json!({"method":"Target.attachedToTarget","params":{"sessionId":session,"waitingForDebugger":waiting,
         "targetInfo":{"type":kind,"url":url,"targetId":format!("target-{session}")}}})
 }
+fn acknowledge(mock: &Mock, command: &Value, result: Value) {
+    mock.event.send(json!({"id":command["id"],"result":result})).unwrap();
+}
 async fn wait_for(mock: &Mock, method: &str, count: usize) -> Vec<Value> {
     timeout(Duration::from_secs(3), async {
         loop {
@@ -98,7 +101,8 @@ fn spawn(
         Duration::from_millis(300),
     ))
 }
-fn assert_never_paused_or_navigated(mock: &Mock) {
+fn assert_scoped_attach_without_navigation(mock: &Mock) {
+    let mut initial = true;
     for command in mock.commands.lock().unwrap().iter() {
         assert!(!matches!(
             command["method"].as_str(),
@@ -113,7 +117,13 @@ fn assert_never_paused_or_navigated(mock: &Mock) {
             assert_eq!(command["params"]["timeout"], 250);
         }
         if command["method"] == "Target.setAutoAttach" {
-            assert_eq!(command["params"]["waitForDebuggerOnStart"], false);
+            let enabled = command["params"]["autoAttach"] == true;
+            assert_eq!(command["params"]["waitForDebuggerOnStart"], enabled && initial);
+            if enabled {
+                assert_eq!(command["params"]["filter"],
+                    json!([{"type":"page"},{"type":"webview"},{"exclude":true}]));
+                initial = false;
+            }
         }
     }
 }
@@ -158,6 +168,103 @@ fn endpoints_are_exact_instance_loopback_and_targets_are_local_documents() {
 }
 
 #[tokio::test]
+async fn fresh_local_target_queues_enable_and_registration_then_releases_without_ack() {
+    let mock = mock(None, true, Duration::ZERO).await;
+    let (_source, receiver) = watch::channel(Some("verified".into()));
+    let (stop, stopping) = watch::channel(false);
+    let task = spawn(&mock, receiver, stopping, Duration::from_secs(5));
+    let setup = wait_for(&mock, "Target.setAutoAttach", 1).await;
+    acknowledge(&mock, &setup[0], json!({}));
+    mock.event.send(attached("fresh", "page", "about:blank", true)).unwrap();
+    // No Page or registration command has been acknowledged. A held Electron
+    // target cannot return those ACKs until Runtime releases its startup wait.
+    let resumes = wait_for(&mock, "Runtime.runIfWaitingForDebugger", 1).await;
+    let enable = wait_for(&mock, "Page.enable", 1).await;
+    let adds = wait_for(&mock, "Page.addScriptToEvaluateOnNewDocument", 1).await;
+    assert!(adds[0]["params"].get("runImmediately").is_none(),
+        "a paused first document must only register its bootstrap");
+    let commands = mock.commands.lock().unwrap().clone();
+    let enable_at = commands.iter().position(|v| v["method"] == "Page.enable").unwrap();
+    let add_at = commands.iter().position(|v| v["method"] == "Page.addScriptToEvaluateOnNewDocument").unwrap();
+    let resume_at = commands.iter().position(|v| v["method"] == "Runtime.runIfWaitingForDebugger").unwrap();
+    assert!(enable_at < add_at && add_at < resume_at);
+    assert_eq!(enable[0]["sessionId"], "fresh");
+    assert_eq!(adds[0]["sessionId"], "fresh");
+    assert_eq!(resumes[0]["sessionId"], "fresh");
+    // Late or reordered ACKs must not register the same revision twice.
+    acknowledge(&mock, &adds[0], json!({"identifier":"first-document"}));
+    acknowledge(&mock, &enable[0], json!({}));
+    acknowledge(&mock, &resumes[0], json!({}));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(mock.commands.lock().unwrap().iter()
+        .filter(|v| v["method"] == "Page.addScriptToEvaluateOnNewDocument").count(), 1);
+    stop.send(true).unwrap();
+    task.await.unwrap().unwrap();
+    assert_scoped_attach_without_navigation(&mock);
+    mock.task.abort();
+}
+
+#[tokio::test]
+async fn released_first_document_reclaims_late_acks_on_revocation_replacement_stop_and_timeout() {
+    for reason in ["revocation", "replacement", "stop", "expiry", "timeout"] {
+        let mock = mock(None, true, Duration::ZERO).await;
+        let (source, receiver) = watch::channel(Some("verified".into()));
+        let (stop, stopping) = watch::channel(false);
+        let window = if reason == "expiry" { Duration::from_millis(200) }
+            else { Duration::from_secs(5) };
+        let task = spawn(&mock, receiver, stopping, window);
+        let setup = wait_for(&mock, "Target.setAutoAttach", 1).await;
+        acknowledge(&mock, &setup[0], json!({}));
+        mock.event.send(attached("fresh", "webview", "app://-/index.html", true)).unwrap();
+        let resumes = wait_for(&mock, "Runtime.runIfWaitingForDebugger", 1).await;
+        let enable = wait_for(&mock, "Page.enable", 1).await;
+        let adds = wait_for(&mock, "Page.addScriptToEvaluateOnNewDocument", 1).await;
+        match reason {
+            "revocation" => source.send(None).unwrap(),
+            "replacement" => source.send(Some("verified-two".into())).unwrap(),
+            "stop" => stop.send(true).unwrap(),
+            _ => {}
+        }
+        assert_eq!(resumes[0]["sessionId"], "fresh", "{reason}");
+        if matches!(reason, "revocation" | "replacement") {
+            wait_for(&mock, "Runtime.evaluate", 1).await;
+            acknowledge(&mock, &resumes[0], json!({}));
+            acknowledge(&mock, &enable[0], json!({}));
+            if reason == "replacement" {
+                let replacement = wait_for(&mock, "Page.addScriptToEvaluateOnNewDocument", 2).await;
+                assert!(replacement[1]["params"]["source"].as_str().unwrap().contains("verified-two"));
+                acknowledge(&mock, &replacement[1], json!({"identifier":"replacement-script"}));
+            }
+            // The old registration must still be removed after its late ACK,
+            // without a second startup wait or an extra registration.
+            acknowledge(&mock, &adds[0], json!({"identifier":"obsolete-script"}));
+            wait_for(&mock, "Page.removeScriptToEvaluateOnNewDocument", 1).await;
+            assert_eq!(mock.commands.lock().unwrap().iter()
+                .filter(|v| v["method"] == "Page.addScriptToEvaluateOnNewDocument").count(),
+                if reason == "replacement" { 2 } else { 1 });
+            stop.send(true).unwrap();
+        } else if reason == "stop" {
+            acknowledge(&mock, &enable[0], json!({}));
+            acknowledge(&mock, &adds[0], json!({"identifier":"stopped-script"}));
+        }
+        let result = timeout(Duration::from_secs(2), task).await.unwrap().unwrap();
+        if reason == "timeout" {
+            assert!(result.unwrap_err().contains("target wait timed out"));
+        } else {
+            result.unwrap();
+        }
+        let commands = mock.commands.lock().unwrap();
+        let resume = commands.iter().position(|v| v["method"] == "Runtime.runIfWaitingForDebugger").unwrap();
+        if let Some(revoke) = commands.iter().position(|v| v["method"] == "Runtime.evaluate") {
+            assert!(resume < revoke, "release before teardown: {reason}");
+        }
+        drop(commands);
+        assert_scoped_attach_without_navigation(&mock);
+        mock.task.abort();
+    }
+}
+
+#[tokio::test]
 async fn waits_for_trusted_profile_without_blocking_target_and_registers_complete_source_once() {
     let mock = mock(None, false, Duration::ZERO).await;
     let (source, receiver) = watch::channel(None);
@@ -165,8 +272,9 @@ async fn waits_for_trusted_profile_without_blocking_target_and_registers_complet
     let task = spawn(&mock, receiver, stopping, Duration::from_secs(5));
     wait_for(&mock, "Target.setAutoAttach", 1).await;
     mock.event
-        .send(attached("one", "page", "about:blank", false))
+        .send(attached("one", "page", "about:blank", true))
         .unwrap();
+    wait_for(&mock, "Runtime.runIfWaitingForDebugger", 1).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!mock
         .commands
@@ -206,7 +314,7 @@ async fn waits_for_trusted_profile_without_blocking_target_and_registers_complet
     task.await.unwrap().unwrap();
     wait_for(&mock, "Page.removeScriptToEvaluateOnNewDocument", 1).await;
     wait_for(&mock, "Runtime.evaluate", 1).await;
-    assert_never_paused_or_navigated(&mock);
+    assert_scoped_attach_without_navigation(&mock);
     mock.task.abort();
 }
 
@@ -224,7 +332,9 @@ async fn late_browser_and_already_loaded_target_never_trigger_reload_or_unprotec
     wait_for(&mock, "Page.addScriptToEvaluateOnNewDocument", 1).await;
     stop.send(true).unwrap();
     task.await.unwrap().unwrap();
-    assert_never_paused_or_navigated(&mock);
+    assert!(!mock.commands.lock().unwrap().iter()
+        .any(|v| v["method"] == "Runtime.runIfWaitingForDebugger"));
+    assert_scoped_attach_without_navigation(&mock);
     mock.task.abort();
 }
 
@@ -239,9 +349,9 @@ async fn rejects_unsupported_targets_and_resumes_unexpected_paused_workers() {
         .send(attached("worker", "worker", "app://-/index.html", true))
         .unwrap();
     mock.event
-        .send(attached("remote", "page", "https://example.test", false))
+        .send(attached("remote", "page", "https://example.test", true))
         .unwrap();
-    wait_for(&mock, "Runtime.runIfWaitingForDebugger", 1).await;
+    wait_for(&mock, "Runtime.runIfWaitingForDebugger", 2).await;
     wait_for(&mock, "Target.detachFromTarget", 2).await;
     assert!(!mock
         .commands
@@ -251,7 +361,7 @@ async fn rejects_unsupported_targets_and_resumes_unexpected_paused_workers() {
         .any(|v| v["method"] == "Page.addScriptToEvaluateOnNewDocument"));
     stop.send(true).unwrap();
     task.await.unwrap().unwrap();
-    assert_never_paused_or_navigated(&mock);
+    assert_scoped_attach_without_navigation(&mock);
     mock.task.abort();
 }
 
@@ -285,28 +395,25 @@ async fn source_revocation_removes_registration_without_installing_fake_full_con
 }
 
 #[tokio::test]
-async fn rejected_registration_exits_without_reload_or_client_pause() {
-    let mock = mock(
-        Some("Page.addScriptToEvaluateOnNewDocument"),
-        false,
-        Duration::ZERO,
-    )
-    .await;
-    let (_source, receiver) = watch::channel(Some("verified".into()));
-    let (_stop, stopping) = watch::channel(false);
-    let task = spawn(&mock, receiver, stopping, Duration::from_secs(5));
-    wait_for(&mock, "Target.setAutoAttach", 1).await;
-    mock.event
-        .send(attached("page", "page", "about:blank", false))
-        .unwrap();
-    assert!(timeout(Duration::from_secs(2), task)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap_err()
-        .contains("rejected"));
-    assert_never_paused_or_navigated(&mock);
-    mock.task.abort();
+async fn rejected_registration_releases_fresh_target_without_reload() {
+    for rejected in ["Page.enable", "Page.addScriptToEvaluateOnNewDocument"] {
+        let mock = mock(Some(rejected), false, Duration::ZERO).await;
+        let (_source, receiver) = watch::channel(Some("verified".into()));
+        let (_stop, stopping) = watch::channel(false);
+        let task = spawn(&mock, receiver, stopping, Duration::from_secs(5));
+        wait_for(&mock, "Target.setAutoAttach", 1).await;
+        mock.event.send(attached("page", "page", "about:blank", true)).unwrap();
+        assert!(timeout(Duration::from_secs(2), task).await.unwrap().unwrap()
+            .unwrap_err().contains("rejected"));
+        wait_for(&mock, "Runtime.runIfWaitingForDebugger", 1).await;
+        if rejected == "Page.enable" {
+            // The fresh batch was already queued when enable was rejected.
+            // Its successful late Add ACK must still be removed during cleanup.
+            wait_for(&mock, "Page.removeScriptToEvaluateOnNewDocument", 1).await;
+        }
+        assert_scoped_attach_without_navigation(&mock);
+        mock.task.abort();
+    }
 }
 
 #[tokio::test]
@@ -321,7 +428,7 @@ async fn unresponsive_cdp_commands_and_missing_endpoint_are_bounded() {
         .unwrap()
         .unwrap_err()
         .contains("timed out"));
-    assert_never_paused_or_navigated(&mock);
+    assert_scoped_attach_without_navigation(&mock);
     mock.task.abort();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -383,7 +490,7 @@ async fn launch_window_expiry_cleans_registration_without_holding_client_open() 
         .unwrap()
         .unwrap();
     wait_for(&mock, "Page.removeScriptToEvaluateOnNewDocument", 1).await;
-    assert_never_paused_or_navigated(&mock);
+    assert_scoped_attach_without_navigation(&mock);
     wait_for(&mock, "Runtime.evaluate", 1).await;
     mock.task.abort();
 }
@@ -423,7 +530,7 @@ async fn verified_configuration_change_replaces_script_and_detached_session_is_n
     );
     stop.send(true).unwrap();
     task.await.unwrap().unwrap();
-    assert_never_paused_or_navigated(&mock);
+    assert_scoped_attach_without_navigation(&mock);
     mock.task.abort();
 }
 
@@ -437,6 +544,8 @@ async fn rejected_page_enable_never_registers_an_inert_preload() {
     mock.event.send(attached("page", "page", "about:blank", false)).unwrap();
     assert!(timeout(Duration::from_secs(2), task).await.unwrap().unwrap().unwrap_err().contains("rejected"));
     assert!(!mock.commands.lock().unwrap().iter().any(|v| v["method"] == "Page.addScriptToEvaluateOnNewDocument"));
-    assert_never_paused_or_navigated(&mock);
+    assert!(!mock.commands.lock().unwrap().iter()
+        .any(|v| v["method"] == "Runtime.runIfWaitingForDebugger"));
+    assert_scoped_attach_without_navigation(&mock);
     mock.task.abort();
 }

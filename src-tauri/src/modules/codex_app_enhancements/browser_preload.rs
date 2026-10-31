@@ -1,4 +1,5 @@
-//! Bounded, non-pausing browser CDP registration for one explicit launch.
+//! Bounded browser CDP registration for one explicit launch.
+//! New local targets queue registration before being released to start scripts.
 //! A late attachment only arms future documents. The script's document guard
 //! rejects an already started document; this module never reloads or navigates.
 
@@ -94,7 +95,8 @@ async fn discover(client: &reqwest::Client, port: u16) -> Result<String, String>
 #[derive(Clone)]
 enum Action {
     Setup,
-    EnablePage { session: String },
+    EnablePage { session: String, queued_revision: Option<u64> },
+    Resume { session: String },
     Revoke {
         session: String,
     },
@@ -117,6 +119,7 @@ struct Browser {
     id: u64,
     pending: HashMap<u64, Pending>,
     sessions: HashSet<String>,
+    waiting: HashMap<String, Instant>,
     prepared_sessions: HashSet<String>,
     enabled_pages: HashSet<String>,
     installed: HashSet<(String, String)>,
@@ -124,6 +127,34 @@ struct Browser {
     owner: String,
 }
 impl Browser {
+    fn waiting_deadline(&self) -> Option<Instant> {
+        self.waiting.values().copied().min()
+    }
+
+    async fn release(&mut self, session: &str) -> Result<(), String> {
+        if !self.waiting.contains_key(session)
+            || self.pending.values().any(|pending| {
+                matches!(&pending.action, Action::Resume { session: owner } if owner == session)
+            })
+        {
+            return Ok(());
+        }
+        self.send(
+            "Runtime.runIfWaitingForDebugger",
+            json!({}),
+            Some(session),
+            Some(Action::Resume { session: session.into() }),
+        )
+        .await
+    }
+
+    async fn release_all(&mut self) -> Result<(), String> {
+        for session in self.waiting.keys().cloned().collect::<Vec<_>>() {
+            self.release(&session).await?;
+        }
+        Ok(())
+    }
+
     async fn send(
         &mut self,
         method: &str,
@@ -162,11 +193,16 @@ impl Browser {
         immediate: bool,
     ) -> Result<(), String> {
         if !self.enabled_pages.contains(session) {
-            if !self.pending.values().any(|pending| matches!(&pending.action, Action::EnablePage { session: owner } if owner == session)) {
+            if !self.pending.values().any(|pending| matches!(&pending.action, Action::EnablePage { session: owner, .. } if owner == session)) {
                 self.send("Page.enable", json!({}), Some(session),
-                    Some(Action::EnablePage { session: session.into() })).await?;
+                    Some(Action::EnablePage { session: session.into(),
+                        queued_revision: (!immediate).then_some(revision) })).await?;
             }
-            return Ok(());
+            if immediate {
+                return Ok(());
+            }
+            // A fresh target cannot acknowledge Page commands until released.
+            // Socket ordering queues enable and registration before that release.
         }
         self.prepared_sessions.insert(session.to_string());
         let mut params = json!({"source":guarded_source(source)});
@@ -215,6 +251,9 @@ impl Browser {
         .map_err(|_| "browser preload revocation timed out")?
     }
     async fn update(&mut self, source: Option<&str>, revision: u64) -> Result<(), String> {
+        // A changed or revoked snapshot must never keep a target waiting for
+        // an obsolete registration. Later snapshots only arm future documents.
+        self.release_all().await?;
         for (session, identifier) in self.installed.clone() {
             self.remove(&session, &identifier).await?;
         }
@@ -257,11 +296,16 @@ impl Browser {
             }
             match pending.action {
                 Action::Setup => {}
-                Action::EnablePage { session } => {
+                Action::Resume { session } => {
+                    self.waiting.remove(&session);
+                }
+                Action::EnablePage { session, queued_revision } => {
                     if self.sessions.contains(&session) {
                         self.enabled_pages.insert(session.clone());
-                        if let Some(source) = source {
+                        if let Some(source) = source.filter(|_| queued_revision != Some(revision)) {
                             self.add(&session, source, revision, true).await?;
+                        } else if source.is_none() {
+                            self.release(&session).await?;
                         }
                     }
                 }
@@ -284,6 +328,7 @@ impl Browser {
                         .ok_or("browser preload missing script identifier")?
                         .to_string();
                     self.installed.insert((session.clone(), identifier.clone()));
+                    self.release(&session).await?;
                     if requested != revision || source.is_none() {
                         self.remove(&session, &identifier).await?;
                         if source.is_none() {
@@ -300,22 +345,21 @@ impl Browser {
                 else {
                     return Ok(());
                 };
-                // We never request a pause. Resume an unexpected paused target,
-                // including workers or unsupported URLs, before doing anything else.
-                if event
+                let waiting = event
                     .pointer("/params/waitingForDebugger")
                     .and_then(Value::as_bool)
-                    == Some(true)
-                {
-                    self.send(
-                        "Runtime.runIfWaitingForDebugger",
-                        json!({}),
-                        Some(session),
-                        None,
-                    )
-                    .await?;
+                    == Some(true);
+                if waiting {
+                    // Record before any await, including unsupported targets,
+                    // so cancellation and registration errors always release it.
+                    let deadline = Instant::now() + self.command_timeout.min(COMMAND);
+                    self.waiting.entry(session.into()).or_insert(deadline);
                 }
-                if !local_target(&event["params"]["targetInfo"]) {
+                let local = local_target(&event["params"]["targetInfo"]);
+                if waiting && (!local || source.is_none()) {
+                    self.release(session).await?;
+                }
+                if !local {
                     self.send(
                         "Target.detachFromTarget",
                         json!({"sessionId":session}),
@@ -325,18 +369,25 @@ impl Browser {
                     .await?;
                 } else if self.sessions.insert(session.to_string()) {
                     if let Some(source) = source {
-                        self.add(session, source, revision, true).await?;
+                        self.add(session, source, revision, !waiting).await?;
+                        if waiting {
+                            self.release(session).await?;
+                        }
                     }
+                } else if waiting {
+                    self.release(session).await?;
                 }
             }
             Some("Target.detachedFromTarget") => {
                 if let Some(session) = event.pointer("/params/sessionId").and_then(Value::as_str) {
                     self.sessions.remove(session);
+                    self.waiting.remove(session);
                     self.prepared_sessions.remove(session);
                     self.enabled_pages.remove(session);
                     self.installed.retain(|(owner, _)| owner != session);
                     self.pending.retain(|_, pending| match &pending.action {
-                        Action::EnablePage { session: owner }
+                        Action::EnablePage { session: owner, .. }
+                        | Action::Resume { session: owner }
                         | Action::Add { session: owner, .. }
                         | Action::Revoke { session: owner }
                         | Action::Remove { session: owner, .. } => owner != session,
@@ -349,15 +400,31 @@ impl Browser {
         Ok(())
     }
     async fn cleanup(&mut self) {
+        // Release before teardown evaluation or draining ACKs. Disable new
+        // waits first, but keep sessions attached until their scripts are removed.
+        let _ = self.release_all().await;
+        let _ = self
+            .send(
+                "Target.setAutoAttach",
+                json!({"autoAttach":true,"waitForDebuggerOnStart":false,"flatten":true,
+                    "filter":[{"type":"page"},{"type":"webview"},{"exclude":true}]}),
+                None,
+                Some(Action::Setup),
+            )
+            .await;
+        let unpaused_id = self.id;
         // Drain outstanding registration acknowledgements so a cancellation
-        // cannot strand an acknowledged future-document script on the page.
+        // cannot strand a script or an already queued waiting target.
         let deadline = Instant::now() + Duration::from_millis(250);
         while self
             .pending
             .values()
-            .any(|p| matches!(p.action, Action::Add { .. }))
-            && Instant::now() < deadline
+            .any(|p| matches!(p.action, Action::Add { .. } | Action::Resume { .. }))
+            || self.pending.contains_key(&unpaused_id)
         {
+            if Instant::now() >= deadline {
+                break;
+            }
             let Ok(Some(Ok(Message::Text(text)))) =
                 tokio::time::timeout_at(deadline, self.socket.next()).await
             else {
@@ -438,6 +505,7 @@ async fn run_bounded(
         id: 0,
         pending: HashMap::new(),
         sessions: HashSet::new(),
+        waiting: HashMap::new(),
         prepared_sessions: HashSet::new(),
         enabled_pages: HashSet::new(),
         installed: HashSet::new(),
@@ -450,18 +518,29 @@ async fn run_bounded(
         browser
             .send(
                 "Target.setAutoAttach",
-                json!({"autoAttach":true,"waitForDebuggerOnStart":false,"flatten":true}),
+                json!({"autoAttach":true,"waitForDebuggerOnStart":true,"flatten":true,
+                    "filter":[{"type":"page"},{"type":"webview"},{"exclude":true}]}),
                 None,
                 Some(Action::Setup),
             )
             .await?;
         let mut tick = tokio::time::interval(Duration::from_millis(50));
         loop {
+            let waiting_deadline = browser.waiting_deadline().unwrap_or(deadline);
             tokio::select! { biased;
                 changed = source.changed() => {
                     if changed.is_err() { break; }
                     let next = source.borrow_and_update().clone();
-                    if next != script { revision += 1; script = next; browser.update(script.as_deref(), revision).await?; }
+                    if next != script {
+                        revision += 1;
+                        script = next;
+                        timeout(waiting_deadline.saturating_duration_since(Instant::now()),
+                            browser.update(script.as_deref(), revision)).await
+                            .map_err(|_| "browser preload target wait timed out")??;
+                    }
+                }
+                _ = tokio::time::sleep_until(waiting_deadline) => {
+                    return Err("browser preload target wait timed out".into());
                 }
                 _ = tick.tick() => {
                     if browser.pending.values().any(|p| p.sent.elapsed() >= command_timeout) {
@@ -473,7 +552,11 @@ async fn run_bounded(
                     match message.map_err(|_| "browser preload transport failed")? {
                         Message::Text(text) => {
                             let event = serde_json::from_str(&text).map_err(|_| "browser preload invalid response")?;
-                            browser.event(event, script.as_deref(), revision).await?;
+                            let event_deadline = browser.waiting_deadline().unwrap_or_else(||
+                                Instant::now() + command_timeout.min(COMMAND));
+                            tokio::time::timeout_at(event_deadline,
+                                browser.event(event, script.as_deref(), revision)).await
+                                .map_err(|_| "browser preload target wait timed out")??;
                         }
                         Message::Close(_) => return Err("browser preload transport closed".into()),
                         _ => {},
