@@ -88,6 +88,6 @@ modules. Keep execution history out of this document.
 
 ## Fork and updates
 
-This fork integrates the feature with upstream v1.3.76. Its updater still points
+This fork integrates the feature with upstream v1.3.77. Its updater still points
 to upstream releases, so installing an upstream update can replace the fork's
 enhancements. A fork-specific update channel is not configured.
