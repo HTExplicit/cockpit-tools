@@ -4,6 +4,8 @@
 
 > 本仓库是 [HTExplicit 维护的 fork](https://github.com/HTExplicit/cockpit-tools)，基于 [jlcodes99/cockpit-tools](https://github.com/jlcodes99/cockpit-tools)，并入了默认关闭的本地 API 接入原生灰字／Tab 预测功能，详见[功能说明](docs/codex-native-predictions.md)。
 
+开发与维护请先阅读[项目约定](AGENTS.md)和[贡献指南](CONTRIBUTING.md)。
+
 [![GitHub stars](https://img.shields.io/github/stars/jlcodes99/cockpit-tools?style=flat&color=gold)](https://github.com/jlcodes99/cockpit-tools)
 [![GitHub downloads](https://img.shields.io/github/downloads/jlcodes99/cockpit-tools/total?style=flat&color=blue)](https://github.com/jlcodes99/cockpit-tools/releases)
 [![GitHub release](https://img.shields.io/github/v/release/jlcodes99/cockpit-tools?style=flat)](https://github.com/jlcodes99/cockpit-tools/releases)

@@ -4,6 +4,8 @@ English · [Portuguese (BR)](README.pt-br.md) · [简体中文](README.md)
 
 > This repository is a [fork maintained by HTExplicit](https://github.com/HTExplicit/cockpit-tools), based on [jlcodes99/cockpit-tools](https://github.com/jlcodes99/cockpit-tools), with native gray-text and Tab predictions for local API connections, disabled by default. See the [feature documentation](docs/codex-native-predictions.md).
 
+For development and maintenance, read the [project conventions](AGENTS.md) and [contribution guide](CONTRIBUTING.md).
+
 [![GitHub stars](https://img.shields.io/github/stars/jlcodes99/cockpit-tools?style=flat&color=gold)](https://github.com/jlcodes99/cockpit-tools)
 [![GitHub downloads](https://img.shields.io/github/downloads/jlcodes99/cockpit-tools/total?style=flat&color=blue)](https://github.com/jlcodes99/cockpit-tools/releases)
 [![GitHub release](https://img.shields.io/github/v/release/jlcodes99/cockpit-tools?style=flat)](https://github.com/jlcodes99/cockpit-tools/releases)

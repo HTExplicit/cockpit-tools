@@ -1,307 +1,93 @@
 # Native composer predictions for local API connections
 
-Cockpit can optionally connect a local API-backed Codex conversation to Codex's
-native next-message prediction editor. Enable **Native next-step predictions
-(Tab completion)** in the Codex enhancement settings, then restart the target
-Codex instance through Cockpit. The option is disabled by default.
+Cockpit connects verified local API-backed Codex conversations to the native
+gray-text suggestion and Tab editor. The feature is disabled by default.
 
-Predictions use the conversation's current model and provider. They make
-additional API requests and consume that provider's usage allowance. A
-prediction becomes an editable draft when accepted with Tab; it is not sent
-automatically.
+## Enable and use
 
-## Compatibility boundary
+Enable **Native next-step predictions (Tab completion)** in Cockpit's Codex
+enhancement settings, then restart the target Codex instance through Cockpit
+when it is idle. The native **Show predictions** preference must also be enabled.
+Pressing Tab accepts a suggestion as an editable draft without sending it.
 
-The adapter uses the existing Cockpit document-start module loader. It does not
-rewrite Codex installation files, create an additional suggestion overlay, or
-send model requests from an independent HTTP client. The Codex app-server owns
-native `thread/sample` inference from the loaded source conversation; the existing Codex editor owns
-the gray suggestion and Tab behavior. A small compatibility controller connects
-those existing interfaces for verified local API connections. It is not a copy
-of the official main-process prediction controller or its remote configuration.
+Predictions make additional API requests using the source conversation's model,
+provider, and context, and consume that provider's usage allowance.
 
-The sampling method is also used by the official prediction controller. Cockpit
-calls it through the app's existing renderer IPC; this does not convert that IPC
-into the main process's private internal-request channel. Unlike the previous
-renderer fork implementation, it creates no ordinary temporary conversation or
-prediction turn for the renderer to treat as user work.
+## Compatibility
 
-ChatGPT-authenticated, remote, SSH, and cloud connections retain their original
-behavior. The original **Show predictions** preference is respected. Unknown
-module layouts leave prediction compatibility disabled while preserving normal
-chat and independently supported Cockpit enhancements.
+- Applies to verified local API connections. ChatGPT-authenticated, remote, SSH,
+  and cloud connections retain their existing behavior.
+- Requires an idle source thread owned by the current client. Plan mode,
+  temporary or side conversations, and closed subagents are excluded.
+- Uses Cockpit's document-start module loader and Codex's native `thread/sample`
+  RPC, editor, and Tab handler. It does not modify the installed Codex files or
+  create a separate editor or HTTP inference client.
+- Shares the initial-module discovery used by other enhancements, including
+  supported re-export wrappers. Unknown or ambiguous native module layouts
+  disable prediction compatibility without disabling normal chat.
+- Fresh local pages queue preload registration before their application scripts
+  run. Existing pages are never paused or reloaded; attachment after document
+  startup can only prepare a future document.
+- Sampling creates no ordinary prediction conversation or turn. Normal task
+  notifications and their preferences are preserved; no notification filter or
+  global mute is installed.
 
-Startup discovery follows the known local loader and companion module families,
-including re-export wrappers, and requires one matching native implementation
-for each prediction role. Both document-start preload and later preparation use
-the same initial-module discovery; asset hashes are not fixed in the adapter.
+## Requests and cancellation
 
-## Request lifecycle
-
-The source thread is resumed and its latest turn checked before calling
-`thread/sample` with its `threadId` and `expectedTurnId`. The native sampler
-inherits the source model, provider, and conversation context; the adapter does
-not replay history or override the model/provider. A short prediction instruction asks
-for JSON containing one `suggestion` string or `null` and explicitly forbids
-acting on the source conversation or calling tools.
-
-The request includes `effort: "low"`, but that is a requested value, not proof
-of the effective reasoning effort. The native sampler applies this override
-only when its provider and model support the required update; otherwise it
-inherits the source setting. The adapter does not change that backend behavior.
+The adapter resumes the source thread, verifies its latest idle turn, and sends
+`thread/sample` with `threadId` and `expectedTurnId`. A result must include the
+matching `sourceTurnId` and a real `responseId`. The adapter does not replay
+history or override the source model or provider.
 
 Requests are deduplicated by source turn, with one active prediction per thread,
-a 45-second deadline, and no automatic retry. New turns, account/provider
-changes, disabling the option, and runtime disposal cancel pending work. Late
-results are discarded. The response must contain the matching `sourceTurnId`
-and a real `responseId`; no prediction thread or turn IDs are fabricated.
+a 45-second deadline, and no automatic retry. New turns, thread deletion,
+account/authentication updates, disabling predictions, and runtime disposal
+cancel pending work. Source eligibility and provider are checked again before
+delivery; stale or late results are discarded. Cancellation settles locally and
+releases listeners before abandoning queued IPC work and sending
+`thread/sample/cancel` for the same request ID. It never interrupts the source
+turn or waits for network cleanup before returning the local result.
 
 Successful suggestions and valid empty suggestions are cached by source turn.
-Non-cancellation errors reject the request and are not cached as successful
-empty results. A later request from the existing native flow may sample that
-source again; the adapter never schedules a retry itself. Cancellation retains
-the existing local `null` result and cleanup behavior.
+Other request errors propagate without caching an empty success. The existing
+native flow may request that source again; the adapter does not schedule retries.
+Unsupported sampling does not fall back to an ordinary prediction conversation.
 
-Suggestion parsing accepts JSON with a `suggestion` string or explicit `null`,
-ignores extra fields, and trims strings. A trimmed empty string is a valid empty
-suggestion. Long or multiline strings pass intact to the native document parser;
-the adapter adds no length, single-line, or control-character rejection rules.
-Malformed JSON, non-object values, a missing field, or a wrong field type fail
-the request rather than becoming a cached empty suggestion.
+The response text must be JSON containing a `suggestion` string or explicit
+`null`. Extra fields are ignored; strings are trimmed, and an empty string is a
+valid empty suggestion. Long and multiline strings reach the native editor
+without an adapter length limit. Malformed JSON, missing fields, and incorrect
+types fail the request. A missing or null response **text** is also a failure,
+distinct from the valid JSON result `{"suggestion": null}`.
 
-Each sample owns its JSON-RPC ID. Cancellation releases local listeners and
-ends the local request first, then abandons the queued IPC request and sends
-`thread/sample/cancel` for that same ID. The existing 45-second wall-clock timer
-is independent of IPC queue expiration. Network cancellation never blocks local
-result delivery, and the source turn is never interrupted. An old task can
-remove only its own active-job entry. Unsupported sampling does not fall back
-to the previous renderer fork path.
+## Backend limits
 
-The native `disableMcp` option applies where the inherited incremental-tool
-window supports it; it is not a universal server-side tool prohibition. The
-sampling response uses `text: null` when a tool call was attempted or no text
-was produced. A null or missing response text is a request failure, distinct
-from the valid empty suggestion encoded as `{"suggestion": null}`.
+The request includes `effort: "low"`; its effective reasoning effort depends on
+model/provider support and may inherit the source setting. The prediction prompt
+forbids actions and tool calls, but the native `disableMcp` option is not a
+universal server-side tool prohibition. A tool attempt or absent text can yield
+null response text, which the adapter treats as a failure.
 
-## Normal task notifications
+## Maintenance and verification
 
-Normal completion notifications and their user preferences are unchanged.
-There is no notification filter, global mute, or replacement toast. Earlier
-renderer prediction forks could enter the ordinary completion path and expose
-their JSON as a notification; the sampling path avoids creating that ordinary
-renderer conversation rather than suppressing its notification afterward.
+Follow the [project conventions](../AGENTS.md) and
+[contribution guide](../CONTRIBUTING.md). For changes to prediction behavior or
+its module graph, run the existing relevant tests:
 
-## Verification and reports
+```sh
+node --experimental-vm-modules --test src-tauri/src/modules/codex_app_enhancements/predictions.test.cjs src-tauri/src/modules/codex_app_enhancements/prediction_graph.test.cjs
+```
 
-Regression coverage belongs with the enhancement configuration tests, the
-synthetic module-transform fixtures, the native module loader, and prediction
-RPC lifecycle tests. Live acceptance must use a synthetic conversation and
-actual Tab key input: a native gray suggestion must become an editable draft
-without increasing the submitted message count. Draft protection, composition
-input, navigation, cancellation, and disabled/unsupported configurations must
-also be checked.
+Add startup, settings, locale, or Rust checks only when those areas change.
+When a compatibility change needs live acceptance, use a synthetic conversation
+and actual Tab input. Verify the editable draft, unchanged submitted-message
+count, existing-draft and IME protection, cancellation, and disabled settings.
+Report only relevant versions, adapter status/reason, and sanitized results;
+exclude credentials, private endpoints, real conversations, and copied Codex
+modules. Keep execution history out of this document.
 
-Compatibility reports should contain the Cockpit and Codex versions, the
-adapter status/reason, and sanitized test results. Do not include credentials,
-provider endpoints, real conversations, or copied official application modules.
+## Fork and updates
 
-### Maintained fork on v1.3.76
-
-The `HTExplicit/cockpit-tools` main branch combines this feature with upstream
-v1.3.76 at `2b5bae022c9bfcd1e537044aa0a1ca86a6a7e499`. Initial-module discovery
-uses the upstream `resolveInitialModule` and `resolveInitialModuleSync`
-implementations. Their existing read callbacks also collect the bootstrap
-sources needed by the prediction graph; the fork does not retain a second
-initial-module discovery implementation.
-
-The upstream background-renderer scheduling and acknowledged `Page.enable`
-before preload registration are preserved. Prediction-specific wrapper and
-manager-module discovery, failure propagation, and suggestion parsing remain
-covered by the enhancement tests. The existing CI regression job now runs
-those CJS tests as well.
-
-Integration regression checks passed 149 enhancement CJS tests, with 16 optional
-installed-artifact checks skipped and no failures. TypeScript typechecking,
-all 18 locale key checks, both enhancement-settings variants, and 70 targeted
-Rust enhancement/configuration checks passed. The selected modules from the
-official Windows package `26.1027.3384.0` passed prediction-only and
-prediction-with-Fast preparation: synchronous and asynchronous discovery chose
-the same initial module and three companions, and all four prepared modules
-parsed successfully.
-
-An isolated renderer smoke test used controlled synthetic sample responses,
-not model inference. Its first sample rejected without a second automatic
-request during a 1201.5 ms observation window. Navigating away and back invoked
-the existing native trigger, displayed the native gray suggestion, and accepted
-the exact 271-character multiline draft through an actual Tab keyboard event
-(`Input.dispatchKeyEvent`). The source turn count and turn-content hash stayed
-unchanged; no message was sent. The private prediction display preference and
-synthetic draft were restored after acceptance. This test does not establish
-model latency or change the native sampler's own timeout.
-
-This integration changes source only. It does not publish a release, change
-the local installation, restart an existing Codex instance, or configure a
-fork-specific updater. The updater still points to the upstream releases;
-installing an upstream release can replace this fork's enhancements. The
-prediction setting remains disabled by default.
-
-### Sampling preflight
-
-The installed app-server `0.164.0-alpha.11.1` was tested with the current API
-model/provider in an isolated synthetic source. Sampling returned a valid
-suggestion and matching source ID in about 5.4 seconds. The original request of
-a second sample returned `sample canceled` after cancellation; an empty cancel
-acknowledgement alone was not counted as proof. Source turns remained unchanged,
-and sampling emitted no ordinary turn-start, turn-complete, or message-delta events.
-
-In the unmodified official desktop app, a transparent test observer forwarded
-the ordinary completion notification and received its real native `onShown`
-callback. A successful renderer sampling request then produced no additional
-notification calls or native callbacks during a dedicated 5.4-second window.
-The observer did not discard calls, and its original host reference and the
-isolated notification preference were restored after the test. These are
-preflight results; corrected-adapter acceptance is recorded separately below.
-
-### Corrected sampling adapter acceptance
-
-The sampling acceptance used the unmodified official Windows package
-`26.1021.3705.0` and app-server `0.164.0-alpha.11.1`. The older desktop version
-below belongs to the initial implementation's historical acceptance.
-
-The v2 adapter generated both catch-up and automatic live predictions through
-the official sampler. Real `responseId` and matching source-turn metadata were
-observed, and the native `cumberbatch` plugin displayed the suggestion. Actual
-Tab acceptance inserted the exact editable draft without changing message
-counts. Existing-draft, Chinese IME, and running-turn stale-suggestion checks
-also passed.
-
-With this adapter enabled, the ordinary synthetic task produced one forwarded
-completion notification and one real native `onShown` callback. Its automatic
-live prediction then succeeded without any additional notification calls or
-native callbacks during a dedicated 5577.8 ms post-success window. The observer
-forwarded every call and restored the original host reference afterward; no
-notification filter or global mute was used.
-
-An actual in-flight adapter request was also cancelled through the renderer
-IPC path. The same request ID was observed at sample dispatch, enqueue ACK,
-abandon, and `thread/sample/cancel`; the original sample returned
-`-32603: sample canceled`, not merely a queued-request error or cancel ACK.
-Source turns remained unchanged, and no source turn was interrupted.
-
-The updated adapter/module graph suite passed 33 tests. The complete enhancement
-CJS suite passed 136 tests, with 15 optional artifact checks skipped and no
-failures. The standard Windows release build, including its required TypeScript
-checks, also passed. Unrelated initial tests below were not additionally rerun.
-
-The accepted Windows build was installed after a new complete backup of the
-preceding build; the original pre-feature backup was retained. All 19 deployed
-files matched the validated bundle. The complete Cockpit configuration was
-semantically unchanged, predictions remained enabled, and the original Codex
-process continued running. The installed official ASAR hash was unchanged.
-Existing Codex documents load the sampling adapter after an idle instance
-restart through Cockpit; installation did not restart those documents.
-
-### Initial fork implementation acceptance (historical)
-
-The adapter was exercised on Windows with Codex desktop `26.1021.31345`
-(build `21828`) and an API-backed local synthetic conversation. The installed
-official app files were not changed. That version produced a suggestion
-through a native ephemeral prediction fork and the existing `cumberbatch`
-editor plugin. Actual Tab key input changed the empty editor document into the
-suggested editable draft; the submitted user/assistant message counts stayed
-at three each. Separate checks preserved an unsent draft and Chinese IME
-composition without accepting a prediction or sending a message.
-
-| Native suggestion before Tab | Editable draft after Tab |
-| --- | --- |
-| ![Native gray suggestion in the synthetic test](images/native-predictions/before-tab.png) | ![The same suggestion accepted as a draft](images/native-predictions/after-tab.png) |
-
-With the native **Show predictions** preference disabled, a subsequent
-synthetic turn completed without starting a prediction. With it enabled, the
-previous suggestion disappeared throughout the next active user turn.
-
-The synthetic module/RPC tests cover unsupported and ambiguous contracts,
-independent prediction-only activation, shared Fast/quota module graphs,
-transport reattachment, native setting disablement, early/late notifications,
-timeout, cancellation, approval requests, invalid fork identities, and cleanup.
-The initial adapter and graph checks passed 26 tests. The full enhancement CJS
-suite passed 129 tests with 15 optional installed-artifact checks skipped.
-The shared settings UI passed both variants; all 18 locale files passed key
-validation. Rust enhancement/lifecycle checks passed 67 tests, with the two
-additional default/partial-update configuration checks also passing.
-
-On this Windows machine the generated Rust library-test executable needed a
-Common Controls v6 manifest to load `TaskDialogIndirect`. The manifest was
-added only to that local build artifact before running the tests. The normal
-Tauri application already contains the required manifest; no system DLL or
-product dependency changes were made for the test harness.
-
-The full TypeScript suite on a Chinese Windows locale had two pre-existing
-compact-number formatting assertion failures (`4567` versus English `4.6K`,
-and `4500` versus `4.5K`). Both were reproduced from the unmodified upstream
-revision `2cfe5e51314bfc0bf70bdda1ba08aed82c7dc8bf`; prediction settings tests and
-the TypeScript typecheck passed. This feature does not change number formatting.
-
-The separate Electron native-module-loader smoke test also has a pre-existing
-assertion mismatch on both this branch and that upstream revision: it expects
-an unsupported quota module to fail, while the existing loader successfully
-selects its Fast-only fallback. The test reaches that assertion in about four
-seconds; an earlier 30-second startup timeout was not reproduced. This smoke
-test is not counted as passing.
-
-The Windows release build completed successfully. The local installation was
-fully backed up before replacement; all 19 deployed files were verified, the
-new option appeared enabled in the installed settings UI, and the only
-configuration difference was the new prediction setting. The original Codex
-process remained open and its installed ASAR hash was unchanged. Activating the
-feature in an already open Codex document still requires restarting that
-instance through Cockpit when idle.
-
-### Cleanup timing follow-up (historical fork implementation)
-
-A read-only comparison with the installed native prediction helper confirmed
-that local listeners are released synchronously and server interrupt/unsubscribe
-acknowledgements are not awaited before completing the request. The compatibility
-adapter at that stage followed that order for successful, cancelled, and failed requests.
-It also avoids interrupting an already terminal turn and compares existing job
-promise identities so an old disposed task cannot remove a reacquired task for
-the same source turn. No model, prompt, generation trigger, editor, or retry
-policy changed.
-
-Six additional deterministic regression tests cover deferred cleanup, rejected
-cleanup, terminal failures, job reacquisition, and a synchronous manager error.
-The updated adapter/module graph checks passed 32 tests; the complete enhancement
-CJS suite passed 135 tests with the same 15 optional artifact checks skipped.
-The unrelated initial configuration, locale, and Rust results above remain the
-original acceptance results.
-
-One paired synthetic measurement used the same official Codex version and
-conversation, with temporary test-harness instrumentation only:
-
-Gray timing records the native plugin's DOM insertion with `MutationObserver`;
-it is not a physical screen-paint measurement.
-
-| Interval | Before | After |
-| --- | ---: | ---: |
-| Prediction request to prediction turn completed | 6921.1 ms | 5199.0 ms |
-| Turn completed to service result delivered | 38.4 ms | 21.4 ms |
-| Turn completed to native gray rendered | 68.2 ms | 44.5 ms |
-| Turn completed to unsubscribe acknowledged | 38.0 ms | 54.0 ms |
-| Prediction request to native gray rendered | 6989.3 ms | 5243.5 ms |
-
-After the fix, the native gray appeared 9.5 ms before unsubscribe completed.
-This demonstrates that server cleanup no longer blocks result delivery. The
-roughly 1.7-second difference in total duration mostly reflects prediction
-generation variability; this single pair is not evidence of a stable
-seconds-level speedup. Model/provider inference still takes additional time.
-
-The corrected source was rechecked in the native UI: actual Tab acceptance kept
-message counts unchanged, and draft, Chinese IME, and running-turn checks passed.
-Only synthetic conversations and sanitized timing results were retained.
-
-The corrected Windows release was rebuilt and installed after a separate full
-backup of the preceding feature build. All 19 installed files matched the new
-bundle; settings were unchanged and predictions remained enabled. The original
-Codex process and installed ASAR were preserved. The first pre-feature backup
-was also retained. An existing Codex document loads the correction after an
-idle restart through Cockpit.
+This fork integrates the feature with upstream v1.3.76. Its updater still points
+to upstream releases, so installing an upstream update can replace the fork's
+enhancements. A fork-specific update channel is not configured.

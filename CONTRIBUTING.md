@@ -1,112 +1,78 @@
 # Contributing to Cockpit Tools
 
-Thank you for your interest in contributing to Cockpit Tools! This project aims to be the universal manager for AI IDEs, and we welcome contributions of all kinds.
+Read [AGENTS.md](AGENTS.md) before making changes. It is the source of truth for
+code organization, documentation, and verification policy; [.editorconfig](.editorconfig)
+defines editor formatting. This guide provides development commands.
 
-## 🚀 Getting Started
+## Development setup
 
-1.  **Fork** the repository on GitHub.
-2.  **Clone** your fork locally:
-    ```bash
-    git clone https://github.com/YOUR_USERNAME/cockpit-tools.git
-    ```
-3.  **Create a branch** for your feature or bug fix:
-    ```bash
-    git checkout -b feature/my-cool-feature
-    ```
+Install frontend dependencies with `npm ci`. For desktop prerequisites, see the
+[Tauri build guide](docs/TAURI_BUILD_GUIDE.md).
 
-## 🛠️ Project Structure
+## Project layout
 
-This project is a Cargo Workspace:
-- `crates/cockpit-core`: Shared business logic (Library).
-- `src-tauri`: The GUI application (Tauri + React).
-- `crates/cockpit-cli`: The command-line interface.
+| Directory | Responsibility |
+| --- | --- |
+| `src/` | React UI, state, services, and translations |
+| `src-tauri/` | Tauri host, native integrations, and Codex enhancement adapters |
+| `crates/cockpit-core/` | Shared Rust business logic |
+| `crates/cockpit-cli/` | Command-line application |
+| `scripts/` | Development, validation, and release tooling |
+| `tests/` | Integration fixtures and regression tests |
+| `docs/` | Usage, architecture, and development documentation |
 
-## 📝 Coding Standards
+## Minimal verification
 
-- **Rust:** Follow standard Rust idioms. Run `cargo fmt` before committing.
-- **Frontend:** We use React 19 and Tailwind CSS. Use functional components and hooks.
-- **Commits:** Use clear, descriptive commit messages.
+Choose checks for the affected behavior. Documentation-only edits and source
+migrations need relevant link and file-integrity checks plus `git diff --check`,
+without business tests. Full suites, builds, and release preflight are not
+routine requirements for each change.
 
-## 🧪 Testing
+For TypeScript logic or type changes, run the directly affected tests and the
+typecheck. For example:
 
-Run the automated checks that cover the area you changed before submitting a PR:
+```sh
+node node_modules/tsx/dist/cli.mjs --test src/components/codex/CodexAppEnhancementSettings.test.ts
+npm run typecheck
+```
 
-- **TypeScript regression tests:** `npm test`
-- **Release script tests:** `npm run test:release`
-- **TypeScript typecheck:** `npm run typecheck`
-- **Core Rust library:** `npm run test:rust:core`
+For prediction adapter or module-graph behavior:
 
-The build matrix also runs targeted Tauri regression tests and platform builds.
+```sh
+node --experimental-vm-modules --test src-tauri/src/modules/codex_app_enhancements/predictions.test.cjs src-tauri/src/modules/codex_app_enhancements/prediction_graph.test.cjs
+```
 
-For manual development checks:
+Add the startup test only when the startup path changes:
 
-- **GUI:** `npm run tauri dev`
-- **CLI:** `cargo run --package cockpit-cli -- <commands>`
+```sh
+node --experimental-vm-modules --test src-tauri/src/modules/codex_app_enhancements/startup_preload.test.cjs
+```
 
-## 📬 Submitting a Pull Request
+For translation-key changes:
 
-1.  Push your changes to your fork.
-2.  Open a Pull Request against the `main` branch.
-3.  Provide a clear description of the changes and link any related issues.
-4.  Be prepared to iterate based on feedback!
+```sh
+node scripts/check_locales.cjs
+```
 
-## 📜 Code of Conduct
+For Rust changes, select the affected package and filter by test name. For example:
 
-Please be respectful and professional in all interactions. We follow the [Contributor Covenant](https://www.contributor-covenant.org/).
+```sh
+cargo test --package cockpit-tools prediction_only_profile -- --test-threads=1
+```
 
----
+Replace the example test paths or name filter with those covering your change;
+use `cockpit-core` or `cockpit-cli` when that package is affected.
 
-## 📋 Additional Project Specifications
+## Development commands
 
-### TypeScript Configuration
+| Command | Purpose |
+| --- | --- |
+| `npm run dev` | Start the frontend development server |
+| `npm run tauri:dev` | Start the Tauri desktop application |
+| `cargo run --package cockpit-cli -- <commands>` | Run the CLI |
+| `npm run build` | Build the frontend when build verification is needed |
 
-- **Strict mode** enabled (`strict: true`)
-- **No unused locals** (`noUnusedLocals: true`)
-- **No unused parameters** (`noUnusedParameters: true`)
-- **No fallthrough cases in switch** (`noFallthroughCasesInSwitch: true`)
-- Target: ES2020, JSX: react-jsx
+## Releases and security
 
-### Build & Development
-
-| Command | Description |
-|---------|-------------|
-| `npm run tauri dev` | Start development server (port 1420) |
-| `npm run typecheck` | Run TypeScript type checking (auto-runs before build) |
-| `npm run build` | Build frontend (syncs version + typecheck + vite build) |
-| `npm run sync-version` | Sync `package.json` version to Tauri config |
-| `npm run release:preflight` | Run full release pre-check (locales + typecheck + build + cargo check) |
-
-### State Management & i18n
-
-- **State management:** Zustand
-- **Internationalization:** i18next + react-i18next (supports 18 languages)
-- **UI framework:** Tailwind CSS + DaisyUI
-
-### Release Process Summary
-
-1. Update version in `package.json` + CHANGELOG (Chinese & English)
-2. Run `npm run sync-version` → `npm run release:preflight`
-3. Commit → Tag (e.g., `v0.22.20`) → Push branch and tag
-4. CI auto-builds macOS (universal) + Windows + Linux → Generates SHA256 → Updates Homebrew Cask
-
-### Release Targets
-
-- **macOS, Windows, and Linux**
-- macOS recommended: `universal.dmg` (compatible with both Intel and Apple Silicon)
-- Linux packages: `.AppImage`, `.deb`, and `.rpm`
-- Each release includes `SHA256SUMS.txt` for integrity verification
-
-### Branch Strategy
-
-- **Main branch:** `main`
-- **PR target:** `main`
-- **Release tag format:** `v<major>.<minor>.<patch>`
-
-### Related Specification Files
-
-| File | Content |
-|------|---------|
-| `docs/release-process.md` | Detailed release process documentation |
-| `tsconfig.json` | TypeScript strict compilation rules |
-| `.github/workflows/release.yml` | CI/CD release automation |
-| `SECURITY.md` | Security policy |
+Follow the existing [release process](docs/release-process.md) when preparing a
+release. Report security issues through [SECURITY.md](SECURITY.md).

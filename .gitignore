@@ -37,6 +37,7 @@ src-tauri/arms_cache/
 arms.biz.trace.*
 sidecars/sing-box/bin/
 sidecars/cockpit-cliproxy/cockpit-cliproxy
+sidecars/cockpit-cliproxy/bin/
 src-tauri/resources/electron/*
 !src-tauri/resources/electron/.gitkeep
 
