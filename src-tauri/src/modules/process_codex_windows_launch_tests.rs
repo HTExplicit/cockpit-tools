@@ -445,6 +445,7 @@ fn managed_and_default_commands_keep_selected_profiles_and_proxy_environment() {
         ),
         ("CODEX_HOME".into(), "wrong-home".into()),
         ("CODEX_ELECTRON_USER_DATA_PATH".into(), "wrong-data".into()),
+        ("CODEX_CLI_PATH".into(), r"C:\Cockpit\codex-sample\codex.exe".into()),
     ];
     let args = vec![
         "--user-data-dir=old".into(),
@@ -483,6 +484,7 @@ fn managed_and_default_commands_keep_selected_profiles_and_proxy_environment() {
             Some("http://user:secret@127.0.0.1:9123")
         );
         assert!(env[codex_package_launcher::PAYLOAD_ENV].is_none());
+        assert_eq!(env["CODEX_CLI_PATH"].as_deref(), Some(r"C:\Cockpit\codex-sample\codex.exe"));
         assert_eq!(
             request
                 .args

@@ -132,6 +132,35 @@ fn missing_paths_keep_the_error_protocol_used_by_the_path_configuration_dialog()
 }
 
 #[test]
+fn prediction_backend_mismatch_does_not_try_another_official_app() {
+    let result = launch_codex_default_with_path_fallback(
+        Some(PathBuf::from(r"D:\Codex\ChatGPT.exe")),
+        || panic!("A backend mismatch requires an explicit startup error"),
+        |_| Err(CodexDefaultLaunchFailure::NotStarted(
+            "CODEX_SAMPLE_BACKEND_REQUIRED: official app changed".into(),
+        )),
+    );
+    assert!(result.unwrap_err().starts_with("CODEX_SAMPLE_BACKEND_REQUIRED:"));
+}
+
+#[test]
+fn direct_default_and_managed_commands_preserve_prediction_backend_environment() {
+    let env = vec![("CODEX_CLI_PATH".into(), r"C:\Cockpit\codex-sample\codex.exe".into())];
+    let mut default = Command::new("never-executed-chatgpt.exe");
+    default.envs(env.iter().cloned());
+    prepare_codex_windows_default_command(&mut default, &[], Some("selected-home"));
+    let managed = build_windows_codex_instance_command(
+        Path::new("never-executed-chatgpt.exe"), "selected-home", Path::new("selected-data"), &[], &env,
+    );
+    for command in [&default, &managed] {
+        assert!(command.get_envs().any(|(key, value)|
+            key == "CODEX_CLI_PATH"
+                && value == Some(std::ffi::OsStr::new(r"C:\Cockpit\codex-sample\codex.exe"))
+        ));
+    }
+}
+
+#[test]
 fn stale_registration_can_fall_back_only_when_no_client_was_created() {
     let activated = Cell::new(0);
     let result = activate_codex_default_package_with_refresh(

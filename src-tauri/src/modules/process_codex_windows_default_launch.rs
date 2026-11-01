@@ -58,6 +58,8 @@ fn launch_codex_default_with_path_fallback(
         match attempt(&path) {
             Ok(launched) => Some(Ok(launched)),
             Err(CodexDefaultLaunchFailure::Dispatched(error)) => Some(Err(error)),
+            Err(CodexDefaultLaunchFailure::NotStarted(error))
+                if error.starts_with("CODEX_SAMPLE_BACKEND_REQUIRED:") => Some(Err(error)),
             Err(CodexDefaultLaunchFailure::NotStarted(error)) => {
                 missing_only &= error == app_path_missing_error("codex");
                 crate::modules::logger::log_warn(&format!(
@@ -125,6 +127,7 @@ fn start_windows_codex_default(
                 extra_args,
                 fast_after_close,
                 launch_proxy,
+                &default_home_path,
             )
         },
     )?;
@@ -143,6 +146,7 @@ fn try_windows_codex_default_path(
     extra_args: &[String],
     fast_after_close: bool,
     launch_proxy: &CodexLaunchProxy,
+    profile: &Path,
 ) -> Result<(u32, PathBuf), CodexDefaultLaunchFailure> {
     use std::os::windows::process::CommandExt;
     use CodexDefaultLaunchFailure::{Dispatched, NotStarted};
@@ -158,6 +162,8 @@ fn try_windows_codex_default_path(
         .as_ref()
         .map(|package| PathBuf::from(&package.executable))
         .unwrap_or_else(|| selected.to_path_buf());
+    let backend_env = crate::modules::codex_sample_backend::launch_env(profile, &launch_path, &[])
+        .map_err(NotStarted)?;
     let probe_started = Instant::now();
     let before_pids = collect_codex_windows_default_process_entries(
         &launch_path.to_string_lossy(),
@@ -199,8 +205,19 @@ fn try_windows_codex_default_path(
         ));
         let confirmed = activate_codex_default_package_with_refresh(
             package,
-            |package| run_codex_package_activation(package, codex_home, None, extra_args, &env)
-                .map(|pid| { receipt_pid = Some(pid); }),
+            |package| {
+                let backend_env = if Path::new(&package.executable) == launch_path {
+                    backend_env.clone()
+                } else {
+                    crate::modules::codex_sample_backend::launch_env(
+                        profile, Path::new(&package.executable), &[],
+                    )?
+                };
+                let mut effective_env = env.clone();
+                effective_env.extend(backend_env);
+                run_codex_package_activation(package, codex_home, None, extra_args, &effective_env)
+                    .map(|pid| { receipt_pid = Some(pid); })
+            },
             || {
                 query_codex_registered_launch(selected)?
                     .ok_or_else(|| "No registered Codex GUI application".into())
@@ -215,6 +232,7 @@ fn try_windows_codex_default_path(
         ));
         let mut command = Command::new(&launch_path);
         apply_effective_proxy_env_to_command(&mut command, launch_proxy);
+        command.envs(backend_env);
         if should_detach_child() {
             command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
             command

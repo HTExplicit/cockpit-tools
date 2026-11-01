@@ -164,6 +164,10 @@ pub(crate) fn native_fast_enabled_for_profile(profile: &Path) -> bool {
     read_profile(profile).is_ok_and(|profile| profile.native_fast)
 }
 
+pub(crate) fn native_predictions_enabled_for_profile(profile: &Path) -> bool {
+    read_profile(profile).is_ok_and(|profile| profile.native_predictions)
+}
+
 #[derive(Deserialize)]
 struct Target {
     #[serde(rename = "type")]

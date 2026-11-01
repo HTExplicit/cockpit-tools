@@ -588,6 +588,9 @@ fn launch_windows_codex_managed_instance(
         .as_ref()
         .map(|p| PathBuf::from(&p.executable))
         .unwrap_or_else(|| configured.to_path_buf());
+    let backend_env = crate::modules::codex_sample_backend::launch_env(
+        Path::new(codex_home), &launch_path, extra_env,
+    )?;
     if normalized_windows_path_text(&launch_path) != normalized_windows_path_text(configured) {
         update_app_path_in_config("codex", &launch_path, &configured.to_string_lossy());
     }
@@ -608,12 +611,19 @@ fn launch_windows_codex_managed_instance(
         let confirmed = activate_codex_package_with_refresh(
             registered.clone(),
             |package| {
+                let env = if Path::new(&package.executable) == launch_path {
+                    backend_env.clone()
+                } else {
+                    crate::modules::codex_sample_backend::launch_env(
+                        Path::new(codex_home), Path::new(&package.executable), extra_env,
+                    )?
+                };
                 launch_codex_via_package_identity(
                     package,
                     codex_home,
                     app_user_data_dir,
                     extra_args,
-                    extra_env,
+                    &env,
                 ).map(|pid| { receipt_pid = Some(pid); })
             },
             || {
@@ -635,7 +645,7 @@ fn launch_windows_codex_managed_instance(
                 codex_home,
                 app_user_data_dir,
                 extra_args,
-                extra_env,
+                &backend_env,
             ))
             .map_err(|error| format!("Codex launch failed: {error}"))?,
         )

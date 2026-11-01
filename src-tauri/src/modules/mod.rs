@@ -43,6 +43,7 @@ pub mod codex_proxy_node_parser;
 pub mod codex_agent_identity;
 pub mod codex_app_injection;
 pub(crate) mod codex_app_enhancements;
+pub(crate) mod codex_sample_backend;
 pub(crate) mod codex_cli_daemon;
 pub mod codex_auth_diagnostic;
 pub mod codex_config_format;
