@@ -27,7 +27,7 @@ function environment(options = {}) {
     get samples() { return bridgeCalls.filter(call => call.type === "mcp-request"); },
     emit(data) { for (const listener of messages) listener({ data }); },
     respond(id, result = sampleResult()) { env.emit({ type: "mcp-response", hostId: "local", message: { id, result } }); },
-    stop() { api.runtime.dispose(); for (const timer of timers) clearTimeout(timer); },
+    stop() { api.runtime.dispose(); for (const timer of timers) clearTimeout(timer); assert.equal(fake?.listenerCount ?? 0, 0); },
   };
   return env;
 }
@@ -78,6 +78,7 @@ function nativeManager(options = {}) {
     breakRpc() { for (const listener of broken) listener(); },
     listeners, setLatest(value) { latest = value; }, setAuth(value) { auth = value; },
     get listenerCount() { return listeners.size + [...eventListeners.values()].reduce((sum, selected) => sum + selected.size, 0); },
+    get jobListenerCount() { return this.listenerCount - (listeners.size ? 1 : 0) - (eventListeners.get("auth-status")?.size ? 1 : 0); },
     get disposed() { return disposed; },
   };
 }
@@ -195,7 +196,7 @@ test("native sample uses the loaded source and preserves its response shape", as
     assert.equal(result.sourceTurnId, target.latestTurnId);
     assert.equal(result.predictionThreadId, undefined);
     assert.equal(result.predictionTurnId, undefined);
-    assert.equal(result.promptVersion, "cockpit-native-predictions-v2");
+    assert.equal(result.promptVersion, "cockpit-native-predictions-v3");
     assert.deepEqual(fake.calls.map(call => call.method), ["thread/resume"]);
     assert.equal(fake.calls[0].params.threadId, target.threadId);
     assert.equal(fake.calls[0].params.excludeTurns, true);
@@ -210,18 +211,20 @@ test("native sample uses the loaded source and preserves its response shape", as
     assert.equal(params.threadId, target.threadId);
     assert.equal(params.expectedTurnId, target.latestTurnId);
     assert.equal(params.turnTrigger, "composer_predictions");
+    assert.equal(params.threadSource, "composer_predictions");
     assert.equal(params.effort, "low");
     assert.equal(params.disableMcp, true);
     assert.match(params.prompt, /Make zero tool calls/);
     assert.match(params.prompt, /exactly one field/);
+    assert.doesNotMatch(params.prompt, /consequential|200 characters/);
     assert.equal(params.responsesapiClientMetadata.prediction_source_thread_id, target.threadId);
     assert.equal(params.responsesapiClientMetadata.prediction_source_turn_id, target.latestTurnId);
     assert.equal(params.responsesapiClientMetadata.prediction_trigger, target.generationTrigger);
     assert.equal(params.model, undefined);
     assert.equal(params.modelProvider, undefined);
     assert.equal(params.context, undefined);
-    assert.equal(fake.disposed, 2);
-    assert.equal(fake.listenerCount, 0);
+    assert.equal(fake.disposed, 0);
+    assert.equal(fake.jobListenerCount, 0);
     assert.equal(env.messages.size, 0);
     assert.equal(env.timers.size, 0);
     assert.equal(env.api.runtime.status().inFlight, 0);
@@ -254,7 +257,7 @@ test("a sample response can complete before its enqueue acknowledgement", async 
   try {
     const result = await activate(env, fake).requestUserMessagePrediction(target);
     assert.equal(result.text, "Inspect the next diagnostic result.");
-    assert.equal(fake.listenerCount, 0);
+    assert.equal(fake.jobListenerCount, 0);
     assert.equal(env.messages.size, 0);
     assert.equal(env.api.runtime.status().inFlight, 0);
     ack.resolve({});
@@ -278,10 +281,10 @@ test("cancel retires locally before ACK then orders abandon before critical samp
     await until(() => env.samples.length === 1);
     const requestId = env.samples[0].request.id;
     pending[Symbol.dispose]();
-    assert.equal(fake.listenerCount, 0);
+    assert.equal(fake.jobListenerCount, 0);
     assert.equal(env.messages.size, 0);
     assert.equal(env.timers.size, 0);
-    assert.equal(await pending, null);
+    await assert.rejects(pending, { name: "AbortError" });
     assert.equal(env.api.runtime.status().inFlight, 0);
     assert.equal(env.bridgeCalls.length, 1);
     assert.equal(fake.calls.some(call => call.method === "thread/sample/cancel"), false);
@@ -298,8 +301,8 @@ test("cancel retires locally before ACK then orders abandon before critical samp
     assert.equal(cancel.options.priority, "critical");
     assert.equal(cancel.options.source, "composer_predictions");
     assert.equal(cancel.options.coalesce, false);
-    assert.equal(await pending, null);
-    assert.equal(fake.disposed, 2);
+    await assert.rejects(pending, { name: "AbortError" });
+    assert.equal(fake.disposed, 0);
     cancelAck.resolve({});
   } finally { ack.resolve({}); abandon.resolve({}); cancelAck.resolve({}); env.stop(); }
 });
@@ -319,12 +322,12 @@ test("failed abandon and cancel acknowledgements never change the retired result
       const pending = activate(env, fake).requestUserMessagePrediction(target);
       await until(() => env.samples.length === 1);
       pending[Symbol.dispose]();
-      assert.equal(await pending, null);
+      await assert.rejects(pending, { name: "AbortError" });
       await until(() => fake.calls.some(call => call.method === "thread/sample/cancel"));
       cancelAck.reject(new Error("Cancel disconnected"));
       await new Promise(resolve => setImmediate(resolve));
-      assert.equal(await pending, null);
-      assert.equal(fake.listenerCount, 0);
+      await assert.rejects(pending, { name: "AbortError" });
+      assert.equal(fake.jobListenerCount, 0);
       assert.equal(env.messages.size, 0);
       assert.equal(env.api.runtime.status().inFlight, 0);
     } finally { cancelAck.resolve({}); env.stop(); }
@@ -344,7 +347,7 @@ test("an old disposed job and late response cannot disturb a reacquired source j
     env.api.runtime.dispose();
     env.api.setReady(true);
     const second = service.requestUserMessagePrediction(target);
-    assert.equal(await first, null);
+    await assert.rejects(first, { name: "AbortError" });
     await until(() => env.samples.length === 2);
     assert.equal(env.api.runtime.status().inFlight, 1);
     assert.equal(service.requestUserMessagePrediction(target), second);
@@ -355,7 +358,7 @@ test("an old disposed job and late response cannot disturb a reacquired source j
     assert.equal(env.api.runtime.status().completed, 0);
     assert.equal(service.requestUserMessagePrediction(target), second);
     second[Symbol.dispose]();
-    assert.equal(await second, null);
+    await assert.rejects(second, { name: "AbortError" });
     assert.equal(env.api.runtime.status().inFlight, 0);
   } finally { ack.resolve({}); env.stop(); }
 });
@@ -423,8 +426,6 @@ test("ineligible source contexts and incompatible resume results never sample", 
   const cases = [
     { plan: true }, { stale: true }, { context: { ephemeral: true } }, { context: { sideConversation: true } },
     { context: { isClosedSubagent: true } }, { context: { latestCollaborationMode: { mode: "plan" } } },
-    { metadata: { streamRole: { role: "subscriber" } } }, { metadata: { status: "running" } },
-    { metadata: { activeTurnId: "active" } }, { metadata: { ephemeral: true } }, { metadata: { sideConversation: true } },
     { resumed: { collaborationMode: { mode: "plan" } } }, { resumed: { model: null } }, { resumed: { modelProvider: null } },
     { resumed: { thread: { id: "other", status: { type: "idle" } } } },
     { resumed: { thread: { id: "source", status: { type: "active" } } } },
@@ -435,7 +436,7 @@ test("ineligible source contexts and incompatible resume results never sample", 
       if (options.stale) fake.setLatest("new-turn");
       assert.equal(await activate(env, fake).requestUserMessagePrediction(target), null);
       assert.equal(env.samples.length, 0, JSON.stringify(options));
-      assert.equal(fake.listenerCount, 0);
+      assert.equal(fake.jobListenerCount, 0);
       assert.equal(env.messages.size, 0);
     } finally { env.stop(); }
   }
@@ -450,17 +451,17 @@ test("source turn and deletion notifications cancel only the active sample ID", 
       fake.emit({ method, params: { threadId: "unrelated" } });
       assert.equal(env.api.runtime.status().inFlight, 1);
       fake.emit({ method, params: { threadId: "source", turn: { id: "new-turn" } } });
-      assert.equal(await promise, null);
+      await assert.rejects(promise, { name: "AbortError" });
       await until(() => fake.calls.some(call => call.method === "thread/sample/cancel"));
       assert.equal(fake.calls.at(-1).params.requestId, env.samples[0].request.id);
       assert.deepEqual(fake.calls.map(call => call.method), ["thread/resume", "thread/sample/cancel"]);
-      assert.equal(fake.listenerCount, 0);
+      assert.equal(fake.jobListenerCount, 0);
       assert.equal(env.messages.size, 0);
     } finally { env.stop(); }
   }
 });
 
-test("account, auth status and broken RPC invalidate an in-flight sample", async () => {
+test("changed auth status and broken RPC invalidate an in-flight sample", async () => {
   for (const mode of ["account", "auth-status", "rpc-broken"]) {
     const env = environment(), fake = nativeManager({ pending: true });
     try {
@@ -469,12 +470,12 @@ test("account, auth status and broken RPC invalidate an in-flight sample", async
       if (mode === "account") {
         fake.setAuth("chatgpt");
         fake.emit({ method: "account/updated", params: { authMode: "chatgpt" } });
-      } else if (mode === "auth-status") fake.emitEvent(mode, {});
+      } else if (mode === "auth-status") { fake.setAuth("chatgpt"); fake.emitEvent(mode, {}); }
       else fake.breakRpc();
-      assert.equal(await promise, null);
+      await assert.rejects(promise, { name: "AbortError" });
       await until(() => fake.calls.some(call => call.method === "thread/sample/cancel"));
       assert.equal(fake.calls.at(-1).params.requestId, env.samples[0].request.id);
-      assert.equal(fake.listenerCount, 0);
+      assert.equal(fake.jobListenerCount, 0);
       assert.equal(env.messages.size, 0);
     } finally { env.stop(); }
   }
@@ -494,15 +495,17 @@ test("native Show predictions prevents a sample and cancels an active one", asyn
     await until(() => env.samples.length === 1);
     scope.nativeOption = false;
     watchCallback();
-    assert.equal(await pending, null);
+    await assert.rejects(pending, { name: "AbortError" });
     await until(() => fake.calls.some(call => call.method === "thread/sample/cancel"));
+    assert.equal(unwatchCount, 0);
+    env.api.runtime.dispose();
     assert.equal(unwatchCount, 1);
-    assert.equal(fake.listenerCount, 0);
+    assert.equal(fake.jobListenerCount, 0);
     assert.equal(env.messages.size, 0);
   } finally { env.stop(); }
 });
 
-test("a synchronous watch cancellation releases the returned unwatch immediately", async () => {
+test("a synchronous Show predictions change cancels before dispatch and releases on disposal", async () => {
   const env = environment(), fake = nativeManager();
   let unwatchCount = 0;
   const scope = { nativeOption: true, watch(callback) {
@@ -512,11 +515,12 @@ test("a synchronous watch cancellation releases the returned unwatch immediately
   } };
   try {
     activate(env, fake);
-    const result = await env.api.runtime.serviceFor(scope, "local", null).requestUserMessagePrediction(target);
-    assert.equal(result, null);
+    await assert.rejects(env.api.runtime.serviceFor(scope, "local", null).requestUserMessagePrediction(target), { name: "AbortError" });
+    assert.equal(unwatchCount, 0);
+    env.api.runtime.dispose();
     assert.equal(unwatchCount, 1);
     assert.equal(fake.disposed, 0);
-    assert.equal(fake.listenerCount, 0);
+    assert.equal(fake.jobListenerCount, 0);
     assert.equal(env.messages.size, 0);
     assert.equal(env.timers.size, 0);
     assert.equal(env.api.runtime.status().inFlight, 0);
@@ -533,10 +537,10 @@ test("timeout, feature revocation and manager replacement cancel without retry",
       await until(() => env.samples.length === 1);
       if (mode === "disabled") { env.context.__cockpitEnhancements.nativePredictions = false; env.api.runtime.update(); }
       if (mode === "manager-replaced") env.api.runtime.register({ managerForHost: () => nativeManager().manager, nativeEnabled: () => true });
-      assert.equal(await promise, null);
+      await assert.rejects(promise, { name: "AbortError" });
       await until(() => fake.calls.some(call => call.method === "thread/sample/cancel"));
       assert.equal(env.samples.length, 1);
-      assert.equal(fake.listenerCount, 0);
+      assert.equal(fake.jobListenerCount, 0);
       assert.equal(env.messages.size, 0);
     } finally { env.stop(); }
   }
@@ -582,10 +586,14 @@ test("sample failures reject without automatic retry and a new native request ca
         /Unsupported prediction sample|Method not found|sample timed out/);
       assert.equal(env.api.runtime.status().reason, "request-failed");
       assert.equal(env.api.runtime.status().completed, 0);
+      if (mode === "backend-timeout") {
+        assert.equal(env.api.runtime.status().category, "timeout");
+        assert.equal(env.api.runtime.status().code, -32603);
+      }
       await new Promise(resolve => setImmediate(resolve));
       assert.equal(env.samples.length, 1);
       assert.deepEqual(fake.calls.map(call => call.method), ["thread/resume"]);
-      assert.equal(fake.listenerCount, 0);
+      assert.equal(fake.jobListenerCount, 0);
       assert.equal(env.messages.size, 0);
       assert.equal(env.timers.size, 0);
       assert.equal(env.api.runtime.status().inFlight, 0);
@@ -617,7 +625,7 @@ test("a missing or failed bridge rejects without caching an empty result", async
       assert.equal(env.api.runtime.status().completed, 0);
       await new Promise(resolve => setImmediate(resolve));
       assert.equal(env.samples.length, mode === "missing" ? 0 : 1);
-      assert.equal(fake.listenerCount, 0);
+      assert.equal(fake.jobListenerCount, 0);
       assert.equal(env.messages.size, 0);
       assert.equal(env.api.runtime.status().inFlight, 0);
       if (mode === "missing") env.context.electronBridge = originalBridge;
@@ -639,9 +647,9 @@ test("final auth, source turn and provider checks can discard a completed sample
       if (mode === "source") fake.setLatest("new-turn");
       if (mode === "provider") context.modelProvider = "other-provider";
       env.respond(env.samples[0].request.id);
-      assert.equal(await pending, null);
+      await assert.rejects(pending, { name: "AbortError" });
       assert.equal(fake.calls.some(call => call.method === "thread/sample/cancel"), false);
-      assert.equal(fake.listenerCount, 0);
+      assert.equal(fake.jobListenerCount, 0);
       assert.equal(env.messages.size, 0);
     } finally { env.stop(); }
   }
@@ -654,12 +662,15 @@ test("legitimate null and trimmed empty suggestions stay cached as successful em
     const env = environment(), fake = nativeManager({ text });
     try {
       const service = activate(env, fake);
-      assert.equal(await service.requestUserMessagePrediction(target), null);
+      const result = await service.requestUserMessagePrediction(target);
+      assert.equal(result.text, null);
+      assert.equal(result.responseId, "response-sample");
+      assert.equal(result.sourceTurnId, target.latestTurnId);
       assert.equal(env.api.runtime.status().reason, "empty");
       assert.equal(env.api.runtime.status().completed, 1);
-      assert.equal(await service.requestUserMessagePrediction(target), null);
+      assert.equal((await service.requestUserMessagePrediction(target)).text, null);
       assert.equal(env.samples.length, 1);
-      assert.equal(fake.listenerCount, 0);
+      assert.equal(fake.jobListenerCount, 0);
       assert.equal(env.messages.size, 0);
     } finally { env.stop(); }
   }
@@ -676,7 +687,7 @@ test("native string suggestions retain long, multiline and control-character con
       assert.equal(env.api.runtime.status().reason, "completed");
       assert.equal((await service.requestUserMessagePrediction(target)).text, suggestion);
       assert.equal(env.samples.length, 1);
-      assert.equal(fake.listenerCount, 0);
+      assert.equal(fake.jobListenerCount, 0);
       assert.equal(env.messages.size, 0);
     } finally { env.stop(); }
   }
@@ -700,7 +711,7 @@ test("invalid JSON and native suggestion schema failures reject instead of cachi
       assert.equal(env.api.runtime.status().reason, "request-failed");
       assert.equal(env.api.runtime.status().completed, 0);
       assert.equal(env.api.runtime.status().inFlight, 0);
-      assert.equal(fake.listenerCount, 0);
+      assert.equal(fake.jobListenerCount, 0);
       assert.equal(env.messages.size, 0);
       assert.equal(env.timers.size, 0);
       await new Promise(resolve => setImmediate(resolve));
@@ -709,4 +720,136 @@ test("invalid JSON and native suggestion schema failures reject instead of cachi
       assert.equal(env.samples.length, 2);
     } finally { env.stop(); }
   }
+});
+
+
+test("catch-up uses native readiness without repeating the live owner gate", async () => {
+  for (const generationTrigger of ["catch_up", "live"]) {
+    const env = environment(), fake = nativeManager({ metadata: { streamRole: { role: "subscriber" } } });
+    try {
+      const result = await activate(env, fake).requestUserMessagePrediction({ ...target, generationTrigger });
+      if (generationTrigger === "catch_up") {
+        assert.equal(result.responseId, "response-sample");
+        assert.equal(env.samples.length, 1);
+      } else {
+        assert.equal(result, null);
+        assert.equal(env.samples.length, 0);
+      }
+    } finally { env.stop(); }
+  }
+});
+
+test("unchanged account and auth events leave the current sample running", async () => {
+  const env = environment(), fake = nativeManager({ pending: true });
+  try {
+    const service = activate(env, fake), pending = service.requestUserMessagePrediction(target);
+    await until(() => env.samples.length === 1);
+    fake.emit({ method: "account/updated", params: { authMode: "apikey" } });
+    fake.setAuth("apiKey");
+    fake.emitEvent("auth-status", {});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(env.api.runtime.status().cancelled, 0);
+    assert.equal(service.requestUserMessagePrediction(target), pending);
+    env.respond(env.samples[0].request.id);
+    assert.equal((await pending).text, "Inspect the next diagnostic result.");
+    assert.equal(fake.calls.some(call => call.method === "thread/sample/cancel"), false);
+  } finally { env.stop(); }
+});
+
+test("new turns and Show predictions changes clear completed results without extra subscriptions", async () => {
+  const env = environment(), fake = nativeManager();
+  let watchCallback, unwatched = 0;
+  const scope = { nativeOption: true, watch(callback) { watchCallback = callback; return () => { unwatched++; }; } };
+  try {
+    activate(env, fake);
+    const service = env.api.runtime.serviceFor(scope, "local", null);
+    await service.requestUserMessagePrediction(target);
+    assert.equal(fake.listenerCount, 2);
+    await service.requestUserMessagePrediction(target);
+    assert.equal(env.samples.length, 1);
+    assert.equal(fake.listenerCount, 2);
+    fake.emit({ method: "turn/started", params: { threadId: target.threadId } });
+    await service.requestUserMessagePrediction(target);
+    assert.equal(env.samples.length, 2);
+    scope.nativeOption = false;
+    watchCallback();
+    assert.equal(await service.requestUserMessagePrediction(target), null);
+    scope.nativeOption = true;
+    watchCallback();
+    await service.requestUserMessagePrediction(target);
+    assert.equal(env.samples.length, 3);
+    assert.equal(fake.listenerCount, 2);
+    env.api.runtime.dispose();
+    assert.equal(fake.listenerCount, 0);
+    assert.equal(unwatched, 1);
+  } finally { env.stop(); }
+});
+
+test("RPC failures preserve their code while diagnostics exclude response content", async () => {
+  const secret = "SYNTHETIC-PRIVATE-ERROR-CONTENT";
+  const env = environment(), fake = nativeManager({ bridge(payload, context) {
+    if (payload.type !== "mcp-request") return;
+    context.emit({ type: "mcp-response", hostId: "local", message: {
+      id: payload.request.id, error: { code: -32603, message: secret },
+    } });
+    return Promise.resolve({});
+  } });
+  try {
+    await assert.rejects(activate(env, fake).requestUserMessagePrediction(target), error =>
+      error.message === secret && error.code === -32603);
+    const status = env.api.runtime.status();
+    assert.equal(status.stage, "sample");
+    assert.equal(status.category, "rpc");
+    assert.equal(status.code, -32603);
+    assert.equal(typeof status.elapsedMs, "number");
+    assert.equal(JSON.stringify(status).includes(secret), false);
+    assert.equal(env.samples.length, 1);
+  } finally { env.stop(); }
+});
+
+
+test("changing native route scopes retires the previous settings watcher", async () => {
+  const env = environment(), fake = nativeManager();
+  let active = 0;
+  const scope = () => ({ nativeOption: true, watch() { active++; return () => { active--; }; } });
+  try {
+    activate(env, fake);
+    for (let index = 0; index < 4; index++) {
+      const service = env.api.runtime.serviceFor(scope(), "local", null);
+      await service.requestUserMessagePrediction(target);
+      assert.equal(active, 1);
+      assert.equal(fake.listenerCount, 2);
+    }
+    assert.equal(env.samples.length, 1);
+    env.api.runtime.dispose();
+    assert.equal(active, 0);
+  } finally { env.stop(); }
+});
+
+
+test("a late retired subscription failure cannot remove the replacement observer", async () => {
+  const late = deferred(), env = environment(), fake = nativeManager();
+  let subscriptions = 0;
+  const subscribe = fake.manager.subscribe;
+  fake.manager.subscribe = request => {
+    subscriptions++;
+    if (subscriptions === 1) return late.promise;
+    return subscribe(request);
+  };
+  try {
+    const service = activate(env, fake), old = service.requestUserMessagePrediction(target);
+    await until(() => subscriptions === 1);
+    env.api.runtime.dispose();
+    env.api.setReady(true);
+    await assert.rejects(old, { name: "AbortError" });
+    assert.equal((await service.requestUserMessagePrediction(target)).responseId, "response-sample");
+    assert.equal(subscriptions, 3);
+    late.reject(new Error("Retired subscription closed"));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal((await service.requestUserMessagePrediction(target)).responseId, "response-sample");
+    assert.equal(subscriptions, 3);
+    fake.emit({ method: "turn/started", params: { threadId: target.threadId } });
+    await service.requestUserMessagePrediction(target);
+    assert.equal(env.samples.length, 2);
+  } finally { late.resolve({}); env.stop(); }
 });
