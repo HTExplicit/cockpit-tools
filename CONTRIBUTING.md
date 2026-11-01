@@ -48,6 +48,11 @@ Add the startup test only when the startup path changes:
 node --experimental-vm-modules --test src-tauri/src/modules/codex_app_enhancements/startup_preload.test.cjs
 ```
 
+For the Windows prediction backend, build the pinned CLI with
+`pwsh -File sidecars/codex-sample/build.ps1`. Use `-RunTests` only for changes to
+its sample patch. Generated sources, caches, and binaries remain untracked;
+see [prediction compatibility](docs/codex-native-predictions.md) for deployment.
+
 For translation-key changes:
 
 ```sh

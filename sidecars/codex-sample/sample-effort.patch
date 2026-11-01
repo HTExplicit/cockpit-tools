@@ -1,0 +1,71 @@
+diff --git a/codex-rs/app-server/src/thread_sample.rs b/codex-rs/app-server/src/thread_sample.rs
+index 57c4cc1b0d38d958d39fd2d2243ef52cbdb3ac6c..04f90683255bbc956721a1dbb83818a9fc716a44 100644
+--- a/codex-rs/app-server/src/thread_sample.rs
++++ b/codex-rs/app-server/src/thread_sample.rs
+@@ -209,9 +209,7 @@ impl SampleTask {
+                 .insert(codex_core::McpServersDisabled);
+         }
+         options.thread_extension_init.insert(SampleThread);
+-        let effort = params.effort.filter(|_| {
+-            model.supports_reasoning_effort_updates && options.config.model_provider.is_openai()
+-        });
++        let effort = params.effort;
+         options.session_source = Some(SessionSource::Custom("thread_sample".to_string()));
+         options.thread_source = Some(
+             params
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_sample.rs b/codex-rs/app-server/tests/suite/v2/thread_sample.rs
+index b01dd5d5f08fa6c5d58faafb46ea7fdeddac7efa..53d78cf0f34ce6653e55c001b54fc31f82feb9ca 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_sample.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_sample.rs
+@@ -1014,13 +1014,13 @@ async fn sample_rejects_invalid_sources_and_prompts() -> Result<()> {
+ #[test_case(false; "unsupported model")]
+ #[test_case(true; "unsupported provider")]
+ #[tokio::test]
+-async fn unsupported_effort_updates_keep_inherited_effort(
++async fn unsupported_effort_updates_use_sample_effort_without_changing_parent(
+     unsupported_provider: bool,
+ ) -> Result<()> {
+     let server = responses::start_mock_server().await;
+     let mock = responses::mount_sse_sequence(
+         &server,
+-        ["parent", "sample"]
++        ["parent", "sample", "continued-parent"]
+             .map(|id| {
+                 responses::sse(vec![
+                     responses::ev_assistant_message(id, "Completed without usage"),
+@@ -1054,10 +1054,10 @@ async fn unsupported_effort_updates_keep_inherited_effort(
+     let response = sample(
+         &mut client,
+         ThreadSampleParams {
+-            thread_id: parent_id,
++            thread_id: parent_id.clone(),
+             expected_turn_id: turn_id.clone(),
+             prompt: "Predict".to_string(),
+-            effort: Some(ReasoningEffort::Medium),
++            effort: Some(ReasoningEffort::Low),
+             ..Default::default()
+         },
+     )
+@@ -1073,11 +1073,18 @@ async fn unsupported_effort_updates_keep_inherited_effort(
+             output_tokens: None,
+         }
+     );
++    client
++        .start_turn_and_wait_for_completion(TurnStartParams {
++            thread_id: parent_id,
++            input: input("Continue the parent"),
++            ..Default::default()
++        })
++        .await?;
+     let requests = mock.requests();
+-    assert_eq!(
+-        requests[1].body_json()["reasoning"],
+-        requests[0].body_json()["reasoning"]
+-    );
++    assert_eq!(requests.len(), 3);
++    assert_eq!(requests[0].body_json()["reasoning"]["effort"], "high");
++    assert_eq!(requests[1].body_json()["reasoning"]["effort"], "low");
++    assert_eq!(requests[2].body_json()["reasoning"]["effort"], "high");
+     assert!(
+         !requests[1]
+             .input()

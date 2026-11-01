@@ -53,3 +53,5 @@ docs/plugin-architecture-proposal.md
 .qoder/
 
 sidecars/mihomo/bin/
+sidecars/codex-sample/bin/
+sidecars/codex-sample/.source-cache/

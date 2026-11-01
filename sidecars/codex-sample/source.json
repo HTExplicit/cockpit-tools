@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "https://github.com/openai/codex.git",
+    "tag": "rust-v0.166.0-alpha.5.1",
+    "version": "0.166.0-alpha.5.1",
+    "commit": "f79b26ccbb3116b052544666a181012fb45dc49b"
+  },
+  "patchRevision": 1,
+  "rustToolchain": "1.95.0",
+  "upstreamCargoLockSha256": "d6531692f93cac56c60fc055373a6260dc32d2acd86b145aff408698a88b4115",
+  "cargoLockSha256": "cb021edc3d34a73a7e69a5ba95dbe641f224589888e3fac02bb3a1ceb34cbc93",
+  "appVersion": "26.1027.3384.0",
+  "officialCliSha256": "3097c909fb6d5cd63510d44aceb1d42df9f6e85722a3e447e477def1ecf60e16",
+  "officialAsarSha256": "6fbedf054a8d8cafaf5c745b40aa59176512e106e0bd6308275ae123b60fd074",
+  "helpers": [
+    {
+      "path": "codex-code-mode-host.exe",
+      "sha256": "feacc55f74fdc6d5ee3cbfd93d77032bfe91157bd24a6f5a6fe4cc4069026c4c"
+    },
+    {
+      "path": "codex-command-runner.exe",
+      "sha256": "2cc1c8e20206dcba5107f08aa8f8211465c7350d7d564df267b15a13e5471914"
+    },
+    {
+      "path": "codex-windows-sandbox-setup.exe",
+      "sha256": "efee73b933773b433f1cf2f4da59e096a38f68c51bbbadd0f980f3834ef800e6"
+    },
+    {
+      "path": "codex-windows-sandbox-service.exe",
+      "sha256": "5359aa47049694e24d0e2311363010db735112dbc9b98a4ff38de7c620e8bd3d"
+    },
+    {
+      "path": "rg.exe",
+      "sha256": "762d3fb3be7e7831f4e5d814c53dcf44e34fb4201500527e7cb62fd121ae0b9a"
+    }
+  ]
+}

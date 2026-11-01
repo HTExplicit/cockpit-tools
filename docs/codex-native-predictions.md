@@ -10,6 +10,12 @@ enhancement settings, then restart the target Codex instance through Cockpit
 when it is idle. The native **Show predictions** preference must also be enabled.
 Pressing Tab accepts a suggestion as an editable draft without sending it.
 
+Windows launches require the matching Cockpit sample backend. Build it with
+`pwsh -File sidecars/codex-sample/build.ps1`; its source revision and patch are
+kept alongside the script. The executable and matching Windows helpers are
+installed in `codex-sample/` beside Cockpit. Missing or incompatible files stop
+an enhanced launch with an error; disabling predictions uses the official CLI.
+
 Predictions make additional API requests using the source conversation's model,
 provider, and context, and consume that provider's usage allowance.
 
@@ -17,11 +23,12 @@ provider, and context, and consume that provider's usage allowance.
 
 - Applies to verified local API connections. ChatGPT-authenticated, remote, SSH,
   and cloud connections retain their existing behavior.
-- Requires an idle source thread owned by the current client. Plan mode,
+- Follows the native live and catch-up triggers. Live predictions require the
+  source owner; catch-up predictions require a resumed, idle source. Plan mode,
   temporary or side conversations, and closed subagents are excluded.
 - Uses Cockpit's document-start module loader and Codex's native `thread/sample`
-  RPC, editor, and Tab handler. It does not modify the installed Codex files or
-  create a separate editor or HTTP inference client.
+  RPC, editor, and Tab handler. Windows uses a versioned companion CLI through
+  process-local `CODEX_CLI_PATH`; official installed files remain unchanged.
 - Shares the initial-module discovery used by other enhancements, including
   supported re-export wrappers. Unknown or ambiguous native module layouts
   disable prediction compatibility without disabling normal chat.
@@ -39,17 +46,21 @@ The adapter resumes the source thread, verifies its latest idle turn, and sends
 matching `sourceTurnId` and a real `responseId`. The adapter does not replay
 history or override the source model or provider.
 
-Requests are deduplicated by source turn, with one active prediction per thread,
-a 45-second deadline, and no automatic retry. New turns, thread deletion,
-account/authentication updates, disabling predictions, and runtime disposal
-cancel pending work. Source eligibility and provider are checked again before
-delivery; stale or late results are discarded. Cancellation settles locally and
+Requests are deduplicated by source turn, with one active prediction per thread
+and no automatic retry. The backend keeps its native 30-second deadline; the
+45-second transport deadline also allows for IPC and cleanup. New turns, thread
+deletion, authentication changes, disabling predictions, and runtime disposal
+cancel pending work. Ordinary account status updates do not cancel predictions.
+The source turn is checked before delivery; stale results are discarded.
+Cancellation rejects the request and
 releases listeners before abandoning queued IPC work and sending
 `thread/sample/cancel` for the same request ID. It never interrupts the source
 turn or waits for network cleanup before returning the local result.
 
 Successful suggestions and valid empty suggestions are cached by source turn.
-Other request errors propagate without caching an empty success. The existing
+An empty suggestion retains its native result metadata with `text: null`.
+New turns and prediction-setting changes invalidate the cache. Errors and
+cancellation propagate without caching an empty success. The existing
 native flow may request that source again; the adapter does not schedule retries.
 Unsupported sampling does not fall back to an ordinary prediction conversation.
 
@@ -62,11 +73,15 @@ distinct from the valid JSON result `{"suggestion": null}`.
 
 ## Backend limits
 
-The request includes `effort: "low"`; its effective reasoning effort depends on
-model/provider support and may inherit the source setting. The prediction prompt
-forbids actions and tool calls, but the native `disableMcp` option is not a
-universal server-side tool prohibition. A tool attempt or absent text can yield
-null response text, which the adapter treats as a failure.
+The companion CLI applies `effort: "low"` to the private sample's first turn,
+including custom API providers, without changing the source settings or the
+global reasoning-update policy. The provider still controls actual inference
+latency; a response exceeding 30 seconds fails rather than retrying.
+
+The native sample interceptor captures model output before tool execution and
+ordinary turn-completion hooks. Tool attempts or absent text can yield null
+response text, which the adapter treats as a failure. Predictions create no
+ordinary task notifications.
 
 ## Maintenance and verification
 
@@ -79,6 +94,8 @@ node --experimental-vm-modules --test src-tauri/src/modules/codex_app_enhancemen
 ```
 
 Add startup, settings, locale, or Rust checks only when those areas change.
+For the companion backend, use the build script's `-RunTests` option to run the
+direct sample cases against its pinned source and patch.
 When a compatibility change needs live acceptance, use a synthetic conversation
 and actual Tab input. Verify the editable draft, unchanged submitted-message
 count, existing-draft and IME protection, cancellation, and disabled settings.
