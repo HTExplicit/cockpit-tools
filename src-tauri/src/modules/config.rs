@@ -112,8 +112,6 @@ pub struct UserConfig {
     pub codex_app_ui_injection_enabled: bool,
     /// 官方客户端增强，仅在重启目标实例后应用。
     #[serde(default = "default_codex_app_enhancements_enabled")]
-    pub codex_app_native_fast_enabled: bool,
-    #[serde(default = "default_codex_app_enhancements_enabled")]
     pub codex_app_api_quota_compat_enabled: bool,
     /// 本地 API 模式下的原生下一步预测；额外消耗供应商额度，默认关闭。
     #[serde(default)]
@@ -1223,7 +1221,6 @@ impl Default for UserConfig {
             codex_auto_refresh_plan_types: default_codex_auto_refresh_plan_types(),
             codex_sync_wsl: default_codex_sync_wsl(),
             codex_app_ui_injection_enabled: default_codex_app_ui_injection_enabled(),
-            codex_app_native_fast_enabled: default_codex_app_enhancements_enabled(),
             codex_app_api_quota_compat_enabled: default_codex_app_enhancements_enabled(),
             codex_app_native_predictions_enabled: false,
             codex_wsl_config_dir: default_codex_wsl_config_dir(),
@@ -2818,7 +2815,6 @@ mod tests {
             UserConfig::default(),
             serde_json::from_value(serde_json::json!({})).unwrap(),
         ] {
-            assert!(config.codex_app_native_fast_enabled);
             assert!(config.codex_app_api_quota_compat_enabled);
         }
         let disabled: UserConfig = serde_json::from_value(serde_json::json!({
@@ -2826,7 +2822,6 @@ mod tests {
             "codex_app_api_quota_compat_enabled": false
         }))
         .unwrap();
-        assert!(!disabled.codex_app_native_fast_enabled);
         assert!(!disabled.codex_app_api_quota_compat_enabled);
         let config: UserConfig = serde_json::from_value(serde_json::json!({
             "codex_app_native_fast_enabled": true,
@@ -2835,7 +2830,6 @@ mod tests {
         .unwrap();
         let restored: UserConfig =
             serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
-        assert!(restored.codex_app_native_fast_enabled);
         assert!(restored.codex_app_api_quota_compat_enabled);
     }
 
@@ -2859,10 +2853,10 @@ mod tests {
                 "codex_app_native_predictions_enabled": enabled
             }))
             .expect("read an explicit prediction preference");
-            let restored: UserConfig =
-                serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
+            let persisted = serde_json::to_value(config).unwrap();
+            assert!(persisted.get("codex_app_native_fast_enabled").is_none());
+            let restored: UserConfig = serde_json::from_value(persisted).unwrap();
             assert_eq!(restored.codex_app_native_predictions_enabled, enabled);
-            assert!(!restored.codex_app_native_fast_enabled);
             assert!(restored.codex_app_api_quota_compat_enabled);
         }
     }
@@ -2884,13 +2878,13 @@ mod tests {
         )
         .expect("write legacy configuration");
         let legacy = load_test_config(&path);
-        assert!(!legacy.codex_app_native_fast_enabled);
         assert!(legacy.codex_app_api_quota_compat_enabled);
         persist_test_config(&path, &legacy).expect("save supported configuration fields");
         let persisted: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).expect("read saved configuration"))
                 .expect("parse saved configuration");
         for retired in [
+            "codex_app_native_fast_enabled",
             "codex_app_api_dictation_enabled",
             "codex_app_api_dictation_model",
         ] {
@@ -2898,7 +2892,6 @@ mod tests {
         }
         let reloaded = load_test_config(&path);
         assert_eq!(reloaded.language, "ja");
-        assert!(!reloaded.codex_app_native_fast_enabled);
         assert!(reloaded.codex_app_api_quota_compat_enabled);
         fs::remove_dir_all(dir).expect("remove temporary configuration");
     }

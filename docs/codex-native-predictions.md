@@ -10,6 +10,9 @@ enhancement settings, then restart the target Codex instance through Cockpit
 when it is idle. The native **Show predictions** preference must also be enabled.
 Pressing Tab accepts a suggestion as an editable draft without sending it.
 
+Native speed controls are enabled automatically for verified API profiles.
+The prediction preference remains independent and disabled by default.
+
 Windows launches require the matching Cockpit sample backend. Build it with
 `pwsh -File sidecars/codex-sample/build.ps1`; its source revision and patch are
 kept alongside the script. The executable and matching Windows helpers are
@@ -105,6 +108,6 @@ modules. Keep execution history out of this document.
 
 ## Fork and updates
 
-This fork integrates the feature with upstream v1.3.77. Its updater still points
+This fork integrates the feature with upstream v1.3.78. Its updater still points
 to upstream releases, so installing an upstream update can replace the fork's
 enhancements. A fork-specific update channel is not configured.
