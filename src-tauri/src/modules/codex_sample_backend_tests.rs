@@ -9,7 +9,7 @@ struct Fixture {
 fn fixture() -> Fixture {
     let directory = tempfile::tempdir().unwrap();
     let app = directory.path().join("app");
-    let backend = directory.path().join("codex-sample");
+    let backend = directory.path().join("codex-sample/patch-2");
     std::fs::create_dir_all(app.join("resources")).unwrap();
     std::fs::create_dir_all(&backend).unwrap();
     let gui = app.join("ChatGPT.exe");
@@ -37,6 +37,21 @@ fn fixture() -> Fixture {
         gui,
         manifest,
     }
+}
+
+#[test]
+fn manifest_requires_revision_two() {
+    let fixture = fixture();
+    assert_eq!(PATCH_REVISION, 2);
+    assert!(resolve_at(&fixture.manifest, &fixture.gui).is_ok());
+
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&fixture.manifest).unwrap()).unwrap();
+    value["patchRevision"] = serde_json::json!(1);
+    std::fs::write(&fixture.manifest, value.to_string()).unwrap();
+    assert!(resolve_at(&fixture.manifest, &fixture.gui)
+        .unwrap_err()
+        .contains("version"));
 }
 
 #[test]

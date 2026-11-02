@@ -16,7 +16,8 @@ The prediction preference remains independent and disabled by default.
 Windows launches require the matching Cockpit sample backend. Build it with
 `pwsh -File sidecars/codex-sample/build.ps1`; its source revision and patch are
 kept alongside the script. The executable and matching Windows helpers are
-installed in `codex-sample/` beside Cockpit. Missing or incompatible files stop
+installed in `codex-sample/patch-2/` beside Cockpit. Patch revision 2 is required.
+Missing or incompatible files stop
 an enhanced launch with an error; disabling predictions uses the official CLI.
 
 Predictions make additional API requests using the source conversation's model,
@@ -50,8 +51,8 @@ matching `sourceTurnId` and a real `responseId`. The adapter does not replay
 history or override the source model or provider.
 
 Requests are deduplicated by source turn, with one active prediction per thread
-and no automatic retry. The backend keeps its native 30-second deadline; the
-45-second transport deadline also allows for IPC and cleanup. New turns, thread
+and no automatic retry. This fork gives the backend 60 seconds for sampling;
+the 75-second transport deadline also allows for IPC and cleanup. New turns, thread
 deletion, authentication changes, disabling predictions, and runtime disposal
 cancel pending work. Ordinary account status updates do not cancel predictions.
 The source turn is checked before delivery; stale results are discarded.
@@ -79,7 +80,10 @@ distinct from the valid JSON result `{"suggestion": null}`.
 The companion CLI applies `effort: "low"` to the private sample's first turn,
 including custom API providers, without changing the source settings or the
 global reasoning-update policy. The provider still controls actual inference
-latency; a response exceeding 30 seconds fails rather than retrying.
+latency; a response exceeding 60 seconds fails rather than retrying. The full
+source context is retained, so a slow provider can still return no suggestion.
+The longer deadline is a fork-specific change, not the official prediction
+service's behavior.
 
 The native sample interceptor captures model output before tool execution and
 ordinary turn-completion hooks. Tool attempts or absent text can yield null

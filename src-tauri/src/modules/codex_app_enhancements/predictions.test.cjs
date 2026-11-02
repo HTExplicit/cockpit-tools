@@ -9,11 +9,14 @@ const target = { hostId: "local", threadId: "source", latestTurnId: "source-turn
 
 function environment(options = {}) {
   const timers = new Set(), messages = new Set(), bridgeCalls = [];
+  const schedule = options.clock ? options.clock.setTimeout : setTimeout;
+  const unschedule = options.clock ? options.clock.clearTimeout : clearTimeout;
   let fake, nextId = 0;
   const context = { module: { exports: {} }, URL, DOMException, AbortController, Symbol,
+    Date: options.clock ? class extends Date { static now() { return options.clock.now(); } } : Date,
     crypto: { randomUUID: () => `sample-${++nextId}` },
-    setTimeout(callback, delay) { const value = setTimeout(callback, options.timeout ?? delay); timers.add(value); return value; },
-    clearTimeout(value) { timers.delete(value); clearTimeout(value); },
+    setTimeout(callback, delay) { const value = schedule(callback, options.timeout ?? delay); timers.add(value); return value; },
+    clearTimeout(value) { timers.delete(value); unschedule(value); },
     addEventListener(type, listener) { assert.equal(type, "message"); messages.add(listener); },
     removeEventListener(type, listener) { assert.equal(type, "message"); messages.delete(listener); },
     electronBridge: { sendMessageFromView(payload) { bridgeCalls.push(payload); return fake.bridge(payload, env); } },
@@ -27,7 +30,7 @@ function environment(options = {}) {
     get samples() { return bridgeCalls.filter(call => call.type === "mcp-request"); },
     emit(data) { for (const listener of messages) listener({ data }); },
     respond(id, result = sampleResult()) { env.emit({ type: "mcp-response", hostId: "local", message: { id, result } }); },
-    stop() { api.runtime.dispose(); for (const timer of timers) clearTimeout(timer); assert.equal(fake?.listenerCount ?? 0, 0); },
+    stop() { api.runtime.dispose(); for (const timer of timers) context.clearTimeout(timer); assert.equal(fake?.listenerCount ?? 0, 0); },
   };
   return env;
 }
@@ -94,6 +97,27 @@ function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
+}
+
+function testClock() {
+  let now = 0, nextId = 0;
+  const timers = new Map();
+  return {
+    now: () => now,
+    setTimeout(callback, delay) { const id = ++nextId; timers.set(id, { callback, at: now + delay }); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    advance(delay) {
+      const end = now + delay;
+      for (;;) {
+        const next = [...timers].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next) break;
+        now = next[1].at;
+        timers.delete(next[0]);
+        next[1].callback();
+      }
+      now = end;
+    },
+  };
 }
 
 async function until(predicate) {
@@ -206,7 +230,7 @@ test("native sample uses the loaded source and preserves its response shape", as
     assert.equal(sample.hostId, "local");
     assert.equal(sample.priority, "background");
     assert.equal(sample.source, "composer_predictions");
-    assert.equal(sample.timeoutMs, 45000);
+    assert.equal(sample.timeoutMs, 75000);
     assert.equal(sample.coalesce, false);
     assert.equal(params.threadId, target.threadId);
     assert.equal(params.expectedTurnId, target.latestTurnId);
@@ -544,6 +568,71 @@ test("timeout, feature revocation and manager replacement cancel without retry",
       assert.equal(env.messages.size, 0);
     } finally { env.stop(); }
   }
+});
+
+test("the adapter and its RPCs allow 75 seconds before cancelling", async () => {
+  const clock = testClock(), env = environment({ clock }), fake = nativeManager({ pending: true });
+  try {
+    const pending = activate(env, fake).requestUserMessagePrediction(target);
+    let settled = false;
+    pending.then(() => { settled = true; }, () => { settled = true; });
+    await until(() => env.samples.length === 1);
+    assert.equal(fake.calls.find(call => call.method === "thread/resume").options.timeoutMs, 75000);
+    assert.equal(env.samples[0].timeoutMs, 75000);
+    clock.advance(74999);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(settled, false);
+    assert.equal(env.api.runtime.status().inFlight, 1);
+    clock.advance(1);
+    await assert.rejects(pending, { name: "AbortError" });
+    await until(() => fake.calls.some(call => call.method === "thread/sample/cancel"));
+    const status = env.api.runtime.status();
+    assert.equal(status.reason, "cancelled");
+    assert.equal(status.stage, "sample");
+    assert.equal(status.category, "cancelled");
+    assert.equal(status.code, DOMException.ABORT_ERR);
+    assert.equal(status.elapsedMs, 75000);
+    assert.equal(env.samples.length, 1);
+    assert.equal(env.timers.size, 0);
+  } finally { env.stop(); }
+});
+
+test("concurrent timeout and success publish complete diagnostics for their own job", async () => {
+  const clock = testClock(), env = environment({ clock }), fake = nativeManager({ pending: true,
+    request(method, params) {
+      if (method === "thread/resume") return { thread: { id: params.threadId, status: { type: "idle" } },
+        model: "api-model", modelProvider: "local-api" };
+    },
+  });
+  try {
+    const service = activate(env, fake), timedOut = service.requestUserMessagePrediction(target);
+    await until(() => env.samples.length === 1);
+    clock.advance(1000);
+    const successful = service.requestUserMessagePrediction({ ...target, threadId: "other" });
+    await until(() => env.samples.length === 2);
+    clock.advance(2000);
+    env.emit({ type: "mcp-response", hostId: "local", message: {
+      id: env.samples[0].request.id, error: { code: -32603, message: "sample timed out" },
+    } });
+    await assert.rejects(timedOut, error => error.code === -32603);
+    let status = env.api.runtime.status();
+    assert.equal(status.reason, "request-failed");
+    assert.equal(status.stage, "sample");
+    assert.equal(status.category, "timeout");
+    assert.equal(status.code, -32603);
+    assert.equal(status.elapsedMs, 3000);
+    clock.advance(4000);
+    env.respond(env.samples[1].request.id);
+    await successful;
+    status = env.api.runtime.status();
+    assert.equal(status.reason, "completed");
+    assert.equal(status.stage, "complete");
+    assert.equal(status.category, null);
+    assert.equal(status.code, null);
+    assert.equal(status.elapsedMs, 6000);
+    assert.equal(status.completed, 1);
+    assert.equal(status.inFlight, 0);
+  } finally { env.stop(); }
 });
 
 test("only a matching local mcp-response completes a sample", async () => {

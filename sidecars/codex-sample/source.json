@@ -6,7 +6,7 @@
     "version": "0.166.0-alpha.5.1",
     "commit": "f79b26ccbb3116b052544666a181012fb45dc49b"
   },
-  "patchRevision": 1,
+  "patchRevision": 2,
   "rustToolchain": "1.95.0",
   "upstreamCargoLockSha256": "d6531692f93cac56c60fc055373a6260dc32d2acd86b145aff408698a88b4115",
   "cargoLockSha256": "cb021edc3d34a73a7e69a5ba95dbe641f224589888e3fac02bb3a1ceb34cbc93",

@@ -1,7 +1,16 @@
 diff --git a/codex-rs/app-server/src/thread_sample.rs b/codex-rs/app-server/src/thread_sample.rs
-index 57c4cc1b0d38d958d39fd2d2243ef52cbdb3ac6c..04f90683255bbc956721a1dbb83818a9fc716a44 100644
+index 57c4cc1b0d38d958d39fd2d2243ef52cbdb3ac6c..7e42e093d3110a1a5ed527d398462bfea6f9d8db 100644
 --- a/codex-rs/app-server/src/thread_sample.rs
 +++ b/codex-rs/app-server/src/thread_sample.rs
+@@ -52,7 +52,7 @@ use tokio::time::Instant;
+ use tokio_util::sync::CancellationToken;
+ use tokio_util::task::TaskTracker;
+ 
+-const SAMPLE_TIMEOUT: Duration = Duration::from_secs(30);
++const SAMPLE_TIMEOUT: Duration = Duration::from_secs(60);
+ // Bytes conservatively bound tokens, including for byte-fallback tokenizers.
+ const MAX_PROMPT_BYTES: usize = 4_000;
+ const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 @@ -209,9 +209,7 @@ impl SampleTask {
                  .insert(codex_core::McpServersDisabled);
          }
@@ -14,9 +23,27 @@ index 57c4cc1b0d38d958d39fd2d2243ef52cbdb3ac6c..04f90683255bbc956721a1dbb83818a9
          options.thread_source = Some(
              params
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_sample.rs b/codex-rs/app-server/tests/suite/v2/thread_sample.rs
-index b01dd5d5f08fa6c5d58faafb46ea7fdeddac7efa..53d78cf0f34ce6653e55c001b54fc31f82feb9ca 100644
+index b01dd5d5f08fa6c5d58faafb46ea7fdeddac7efa..84af43c17cfbeb3f8852bdd446271074f16ed812 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_sample.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_sample.rs
+@@ -861,7 +861,7 @@ async fn sample_wait_keeps_parent_responsive_and_reclaims_child(stop: SampleStop
+         ResponseTemplate::new(200)
+             .insert_header("content-type", "text/event-stream")
+             .set_body_string(responses::sse(vec![responses::ev_completed("delayed")]))
+-            .set_delay(Duration::from_secs(60)),
++            .set_delay(Duration::from_secs(90)),
+     )
+     .await;
+     let params = ThreadSampleParams {
+@@ -889,7 +889,7 @@ async fn sample_wait_keeps_parent_responsive_and_reclaims_child(stop: SampleStop
+     )
+     .await??;
+     let (expected_error, wait) = match stop {
+-        SampleStop::Timeout => ("sample timed out", WAIT),
++        SampleStop::Timeout => ("sample timed out", Duration::from_secs(75)),
+         SampleStop::Cancel => {
+             let cancel_id = client
+                 .send_raw_request(
 @@ -1014,13 +1014,13 @@ async fn sample_rejects_invalid_sources_and_prompts() -> Result<()> {
  #[test_case(false; "unsupported model")]
  #[test_case(true; "unsupported provider")]

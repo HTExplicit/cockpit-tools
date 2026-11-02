@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 const CLI_VERSION: &str = "0.166.0-alpha.5.1";
 const CLI_COMMIT: &str = "f79b26ccbb3116b052544666a181012fb45dc49b";
 const APP_VERSION: &str = "26.1027.3384.0";
-const PATCH_REVISION: u32 = 1;
+const PATCH_REVISION: u32 = 2;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,7 +159,7 @@ pub(crate) fn launch_env(
             .map_err(backend_error)?
             .parent()
             .ok_or_else(|| backend_error("Cockpit executable has no installation directory"))?
-            .join("codex-sample/manifest.json")
+            .join("codex-sample/patch-2/manifest.json")
     };
     apply_backend_env(true, official_gui, &manifest, existing)
 }
